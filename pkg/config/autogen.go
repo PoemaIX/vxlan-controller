@@ -27,6 +27,12 @@ type AutogenConfig struct {
 	Nodes       map[string]map[string]AutogenAF `yaml:"nodes"`
 	Controllers []string                        `yaml:"controllers"`
 	Clients     []string                        `yaml:"clients"`
+	WebUI       *AutogenWebUI                   `yaml:"web_ui"`
+}
+
+type AutogenWebUI struct {
+	BindAddr string                    `yaml:"bind_addr"`
+	Nodes    map[string]*WebUINodeFile `yaml:"nodes"`
 }
 
 // AutogenAF represents a per-AF bind config.
@@ -189,6 +195,26 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 			afCfg.BindAddr = af.Bind
 		}
 		cfg.AFSettings[afName] = afCfg
+	}
+
+	// WebUI config
+	if ag.WebUI != nil {
+		bindAddr := ag.WebUI.BindAddr
+		if bindAddr == "" {
+			bindAddr = ":8080"
+		}
+		cfg.WebUI = &WebUIConfigFile{
+			BindAddr: bindAddr,
+		}
+		if len(ag.WebUI.Nodes) > 0 {
+			cfg.WebUI.Nodes = make(map[string]*WebUINodeFile, len(ag.WebUI.Nodes))
+			for nodeName, n := range ag.WebUI.Nodes {
+				cfg.WebUI.Nodes[nodeName] = &WebUINodeFile{
+					Label: n.Label,
+					Pos:   n.Pos,
+				}
+			}
+		}
 	}
 
 	// Allowed clients = all client nodes
