@@ -12,13 +12,14 @@ import (
 
 // TimeSync manages NTP time offset correction.
 type TimeSync struct {
-	mu      sync.RWMutex
-	offset  time.Duration
-	servers []string
+	mu           sync.RWMutex
+	offset       time.Duration
+	servers      []string
+	rttThreshold time.Duration // max acceptable RTT; 0 = no limit
 }
 
-func New(servers []string) *TimeSync {
-	return &TimeSync{servers: servers}
+func New(servers []string, rttThreshold time.Duration) *TimeSync {
+	return &TimeSync{servers: servers, rttThreshold: rttThreshold}
 }
 
 // Sync queries all NTP servers, trims outliers if >4 results, and averages.
@@ -35,6 +36,11 @@ func (ts *TimeSync) Sync() error {
 			vlog.Warnf("[NTP] validate %s failed: %v", server, err)
 			continue
 		}
+		if ts.rttThreshold > 0 && resp.RTT > ts.rttThreshold {
+			vlog.Debugf("[NTP] %s: RTT %v exceeds threshold %v, skipping", server, resp.RTT, ts.rttThreshold)
+			continue
+		}
+		vlog.Debugf("[NTP] %s: offset=%v rtt=%v stratum=%d", server, resp.ClockOffset, resp.RTT, resp.Stratum)
 		offsets = append(offsets, resp.ClockOffset)
 	}
 

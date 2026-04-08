@@ -77,6 +77,7 @@ var DefaultClientConfig = ClientConfigFile{
 	StatsIntervalS:     5,
 	NTPServers:         DefaultNTPServers,
 	NTPPeriodH:         23,
+	NTPRTTThresholdMs:  50,
 	AFSettings: map[string]*ClientAFConfigFile{
 		"v4": {
 			Enable:            true,

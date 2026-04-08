@@ -166,7 +166,7 @@ func New(cfg *config.ClientConfig) *Client {
 		CurrentFDB:        make(map[fdbKey]fdbEntry),
 		Filters:           filters,
 		mcastStats:        newMcastStats(),
-		ntp:               ntp.New(cfg.NTPServers),
+		ntp:               ntp.New(cfg.NTPServers, cfg.NTPRTTThreshold),
 		addrEngines:       make(map[types.AFName]*filter.AddrSelectEngine),
 		probeConns:        make(map[types.AFName]*net.UDPConn),
 		probeSessions:     crypto.NewSessionManager(),

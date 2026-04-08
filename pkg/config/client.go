@@ -28,6 +28,7 @@ type ClientConfigFile struct {
 	StatsIntervalS    int                             `yaml:"stats_interval_s"`
 	NTPServers        []string                        `yaml:"ntp_servers"`
 	NTPPeriodH        int                             `yaml:"ntp_period_h"`
+	NTPRTTThresholdMs int                             `yaml:"ntp_rtt_threshold_ms"`
 	Filters           *filter.FilterConfigFile         `yaml:"filters"`
 	LogLevel          string                          `yaml:"log_level"`
 	APISocket         string                          `yaml:"api_socket"`
@@ -70,6 +71,7 @@ type ClientConfig struct {
 	StatsInterval    time.Duration
 	NTPServers       []string
 	NTPPeriod        time.Duration
+	NTPRTTThreshold  time.Duration
 	Filters          *filter.FilterConfig
 	LogLevel         string
 	APISocket        string
@@ -124,6 +126,7 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		InitTimeout:        time.Duration(raw.InitTimeout) * time.Second,
 		StatsInterval:      time.Duration(raw.StatsIntervalS) * time.Second,
 		NTPPeriod:          time.Duration(raw.NTPPeriodH) * time.Hour,
+		NTPRTTThreshold:    time.Duration(raw.NTPRTTThresholdMs) * time.Millisecond,
 		Filters:            filter.ParseFilterConfigFile(raw.Filters, configDir),
 		LogLevel:           raw.LogLevel,
 		APISocket:          raw.APISocket,
