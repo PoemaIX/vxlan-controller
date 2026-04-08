@@ -6,7 +6,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"vxlan-controller/pkg/filter"
@@ -49,7 +48,6 @@ type ControllerAFConfigFile struct {
 	BindAddr          string `yaml:"bind_addr"`
 	AutoIPInterface   string `yaml:"autoip_interface"`
 	AddrSelect        string `yaml:"addr_select"`
-	AddrSelectFile    string `yaml:"addr_select_file"`
 	CommunicationPort uint16 `yaml:"communication_port"`
 	VxlanVNI          uint32 `yaml:"vxlan_vni"`
 	VxlanDstPort      uint16 `yaml:"vxlan_dst_port"`
@@ -195,21 +193,11 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 
 		if hasAutoIP {
 			af.AutoIPInterface = afRaw.AutoIPInterface
-			if afRaw.AddrSelect != "" {
-				af.AddrSelectScript = afRaw.AddrSelect
-			} else if afRaw.AddrSelectFile != "" {
-				data, err := os.ReadFile(afRaw.AddrSelectFile)
-				if err != nil {
-					return nil, fmt.Errorf("af %s: read addr_select_file: %w", name, err)
-				}
-				af.AddrSelectScript = string(data)
-			} else {
-				if strings.Contains(strings.ToLower(name), "v6") || strings.Contains(strings.ToLower(name), "ipv6") {
-					af.AddrSelectScript = filter.DefaultAddrSelectV6
-				} else {
-					af.AddrSelectScript = filter.DefaultAddrSelectV4
-				}
+			script, err := resolveAddrSelect(afRaw.AddrSelect, name)
+			if err != nil {
+				return nil, fmt.Errorf("af %s: %w", name, err)
 			}
+			af.AddrSelectScript = script
 		} else {
 			af.BindAddr, err = netip.ParseAddr(afRaw.BindAddr)
 			if err != nil {

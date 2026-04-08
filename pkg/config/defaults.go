@@ -2,11 +2,35 @@ package config
 
 import (
 	"encoding/base64"
+	"os"
+	"strings"
 
 	"vxlan-controller/pkg/crypto"
+	"vxlan-controller/pkg/filter"
 
 	"gopkg.in/yaml.v3"
 )
+
+// resolveAddrSelect resolves an addr_select value to Lua script content.
+// If the value is a path to an existing file, the file content is read.
+// Otherwise the value is treated as inline Lua code.
+// If empty, a default script is chosen based on the AF name.
+func resolveAddrSelect(addrSelect, afName string) (string, error) {
+	if addrSelect == "" {
+		if strings.Contains(strings.ToLower(afName), "v6") || strings.Contains(strings.ToLower(afName), "ipv6") {
+			return filter.DefaultAddrSelectV6, nil
+		}
+		return filter.DefaultAddrSelectV4, nil
+	}
+
+	// Try as file path
+	if data, err := os.ReadFile(addrSelect); err == nil {
+		return string(data), nil
+	}
+
+	// Treat as inline Lua
+	return addrSelect, nil
+}
 
 func DefaultClientConfigYAML() ([]byte, error) {
 	cfg := DefaultClientConfig
