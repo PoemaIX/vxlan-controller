@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"vxlan-controller/pkg/client"
@@ -21,6 +22,9 @@ import (
 var Version = "dev"
 
 func main() {
+	// Detect mode from argv[0] for symlink usage (e.g., vxscli -> vxlan-controller)
+	argv0 := filepath.Base(os.Args[0])
+
 	mode := flag.String("mode", "", "run mode: controller, client, keygen, vxscli, vxccli")
 	configPath := flag.String("config", "", "path to config file")
 	defaultConfig := flag.Bool("default-config", false, "print default config and exit (controller/client modes)")
@@ -33,6 +37,16 @@ func main() {
 	if *version {
 		fmt.Println("vxlan-controller", Version)
 		return
+	}
+
+	// argv[0] overrides --mode if not explicitly set
+	if *mode == "" {
+		switch argv0 {
+		case "vxscli":
+			*mode = "vxscli"
+		case "vxccli":
+			*mode = "vxccli"
+		}
 	}
 
 	switch *mode {
