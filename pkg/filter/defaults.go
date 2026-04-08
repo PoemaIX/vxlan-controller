@@ -72,13 +72,15 @@ end
 
 // DefaultAddrSelectV6 selects the best IPv6 address from an interface.
 // Filters out: deprecated, link-local, IPv4 addresses.
-// Priority: public IP (prefer prefix_len closest to /64) > prev_ip > ULA/private.
+// Priority: public IP (prefer higher valid_lft, then prefix_len closest to /64) > prev_ip > ULA/private.
 const DefaultAddrSelectV6 = `
 function select(info)
   local addrs = info.addrs
   if #addrs == 0 then return nil end
 
-  local best_pub, best_pub_diff = nil, 999
+  local best_pub = nil
+  local best_pub_vlft = -1
+  local best_pub_diff = 999
   local prev, private = nil, nil
 
   for i = 1, #addrs do
@@ -94,10 +96,13 @@ function select(info)
     if is_ula then
       private = private or a.ip
     else
-      -- public: prefer prefix_len closest to /64
+      -- public: prefer higher valid_lft, then prefix_len closest to /64
+      local vlft = a.valid_lft or 0
       local diff = math.abs(a.prefix_len - 64)
-      if diff < best_pub_diff then
+      if vlft > best_pub_vlft
+        or (vlft == best_pub_vlft and diff < best_pub_diff) then
         best_pub = a.ip
+        best_pub_vlft = vlft
         best_pub_diff = diff
       end
     end

@@ -17,6 +17,8 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
 - **Lua filtering**: User-defined Lua scripts for multicast/route filtering with per-MAC/per-client rate limiting
 - **VXLAN firewall**: nftables-based injection protection, whitelisting only known peer endpoint IPs
 - **WebUI**: Real-time web dashboard with client status, routing tables, latency matrix, and multicast stats
+- **Static cost mode**: Freeze routing costs from live probes for stable, predictable routing
+- **Runtime CLI**: `wg`-style Unix socket CLI (`vxscli`/`vxccli`) for runtime inspection and control
 - **Per-AF AdditionalCost**: Fine-grained path selection cost tuning per address family
 - **Leveled logging**: Five log levels (error/warn/info/debug/verbose) for flexible observability
 
@@ -41,120 +43,197 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
 
 ## Build
 
+Single binary, all modes:
+
 ```bash
-go build -o vxlan-controller ./cmd/controller
-go build -o vxlan-client ./cmd/client
-go build -o keygen ./cmd/keygen
+go build -o vxlan-controller ./cmd/vxlan-controller
 ```
+
+Optional symlinks for CLI convenience:
+
+```bash
+ln -s vxlan-controller /usr/local/bin/vxscli
+ln -s vxlan-controller /usr/local/bin/vxccli
+```
+
+## Quick Start with Autogen
+
+The fastest way to set up a network. Define your topology in one file, generate all configs automatically:
+
+```bash
+vxlan-controller --mode autogen --config topology.yaml
+```
+
+See [`demo/topology.yaml`](demo/topology.yaml) for a complete example:
+
+```yaml
+vxlan_dst_port: 4789
+vxlan_src_port_start: 4789
+vxlan_src_port_end: 4789
+communication_port: 5000
+
+nodes:
+  tokyo:
+    v4:
+      bind: 10.0.1.1            # local bind address
+      ddns: tokyo.example.com   # address clients use to connect
+    v6: "2001:db8:1::1"         # shorthand: bind = this IP
+  osaka:
+    v4: 203.0.113.10
+    v6: "2001:db8:2::1"
+  seoul:
+    v4: 198.51.100.20
+  singapore:
+    v4: 192.0.2.30
+    v6: eth0                    # autoip_interface
+
+controllers:
+  - tokyo
+  - osaka
+
+clients:
+  - tokyo
+  - osaka
+  - seoul
+  - singapore
+```
+
+This generates `tokyo.controller.yaml`, `tokyo.client.yaml`, `osaka.controller.yaml`, etc. with all keypairs and cross-references pre-filled.
+
+**Bind vs DDNS**:
+- `bind` — local address the process listens on (`bind_addr` or `autoip_interface` if it's an interface name)
+- `ddns` — address clients use to connect to this controller (IP, hostname, or DDNS). Defaults to `bind` if bind is a static IP. Required when controller uses `autoip_interface`.
 
 ## Key Generation
 
 Compatible with WireGuard key format:
 
 ```bash
-# Using wg (if available)
-wg genkey | tee privatekey | wg pubkey > publickey
-
 # Using built-in keygen
-./keygen genkey | tee privatekey | ./keygen pubkey > publickey
+vxlan-controller --mode keygen genkey | tee privatekey | vxlan-controller --mode keygen pubkey > publickey
+
+# Or generate a default config with random keys
+vxlan-controller --mode controller --default-config > controller.yaml
+vxlan-controller --mode client --default-config > client.yaml
 ```
+
+The `--default-config` output includes both `private_key` and `public_key` fields. Copy `public_key` to other configs where needed (e.g. `client_id` in controller config).
+
+## CLI Tools
+
+Runtime inspection and control via Unix socket (like `wg show`):
+
+```bash
+# Controller CLI
+vxscli cost get                     # show cost matrix with readable names
+vxscli cost getmode                 # show current cost mode (probe/static)
+vxscli cost setmode static          # switch to static cost mode
+vxscli cost store                   # save current probed costs to config
+
+# Client CLI
+vxccli af list                      # list address families and bind addresses
+vxccli af get v4                    # get bind address for an AF
+vxccli af set v4 192.168.1.100      # set bind address (non-autoip only)
+```
+
+Or without symlinks: `vxlan-controller --mode vxscli cost get`
+
+Custom socket path: `vxscli --sock /path/to/sock cost get`
+
+Default sockets: `/var/run/vxlan-controller.sock`, `/var/run/vxlan-client.sock`
+
+### Static Cost Mode
+
+For stable, predictable routing without probe-driven changes:
+
+```bash
+vxscli cost setmode probe           # 1. ensure probe mode (default)
+vxscli cost get                     # 2. wait for convergence, inspect costs
+vxscli cost store                   # 3. snapshot costs to config (static_costs)
+vxscli cost setmode static          # 4. switch to static routing
+```
+
+In static mode, probing still runs (WebUI sees live data), but route computation uses only the stored costs. Unreachable links (100% packet loss) are still detected and excluded.
 
 ## Configuration
 
 ### Client (`client.yaml`)
 
+```bash
+vxlan-controller --mode client --default-config   # print full default config
+```
+
 ```yaml
-private_key: "<base64 private key>"
+private_key: "<base64>"
+public_key: "<base64>"              # display-only, for easy copying
 bridge_name: "br-vxlan"
-neigh_suppress: false
 clamp_mss_to_mtu: true
-clamp_mss_table: "vxlan_mss"        # nftables table name (default: vxlan_mss)
-vxlan_firewall: true                 # enable nftables VXLAN injection protection
-vxlan_firewall_table: "vxlan_fw"     # nftables table name (default: vxlan_fw)
-init_timeout: 10
-stats_interval_s: 5                  # multicast stats reporting interval
-log_level: "info"                    # error/warn/info/debug/verbose
-filters:
-  output_mcast: |
-    function filter(pkt)
-      if pkt.ethertype == 0x0806 then return true end  -- ARP
-      if pkt.ethertype == 0x86dd and pkt.ipv6_next_header == 58 then
-        if pkt.icmpv6_type == 135 or pkt.icmpv6_type == 136 then return true end
-      end
-      return "non-arp/nd"
-    end
-  rate_limit:
-    per_mac: 64
-    per_client: 1000
+vxlan_firewall: true
+log_level: "info"
+api_socket: "/var/run/vxlan-client.sock"
 address_families:
   v4:
     enable: true
     bind_addr: "192.168.1.100"       # or use autoip_interface instead
     # autoip_interface: "eth0"       # auto-detect IP from interface
-    # addr_select: |                 # optional Lua address selection
+    # addr_select: |                 # inline Lua, or path to .lua file
     #   function select(info) ... end
     probe_port: 5010
-    additional_cost: 20              # per-AF routing cost penalty
+    additional_cost: 20
     vxlan_name: "vxlan-v4"
     vxlan_vni: 100
     vxlan_mtu: 1400
-    vxlan_dstport: 4789
+    vxlan_dst_port: 4789
     controllers:
-      - public_key: "<controller pubkey>"
-        endpoint: "10.0.0.1:5000"
-  v6:
-    enable: true
-    bind_addr: "fd00::100"
-    probe_port: 5010
-    additional_cost: 20
-    vxlan_name: "vxlan-v6"
-    vxlan_vni: 100
-    vxlan_mtu: 1400
-    vxlan_dstport: 4789
-    controllers:
-      - public_key: "<controller pubkey>"
-        endpoint: "[fd00::1]:5000"
+      - pubkey: "<controller pubkey>"
+        addr: "10.0.0.1:5000"
 ```
 
 ### Controller (`controller.yaml`)
 
+```bash
+vxlan-controller --mode controller --default-config   # print full default config
+```
+
 ```yaml
-private_key: "<base64 private key>"
-client_offline_timeout: 300
-sync_new_client_debounce: 2
-sync_new_client_debounce_max: 10
-topology_update_debounce: 1
-topology_update_debounce_max: 5
-log_level: "info"
+private_key: "<base64>"
+public_key: "<base64>"
+cost_mode: "probe"                   # "probe" or "static"
+api_socket: "/var/run/vxlan-controller.sock"
 probing:
-  probe_interval_s: 60
+  probe_interval_s: 5
   probe_times: 5
-  in_probe_interval_ms: 200
-  probe_timeout_ms: 1000
 web_ui:
-  bind_addr: ":8080"                 # WebUI listen address (omit to disable)
-  mac_aliases:                       # optional MAC display names
-    "aa:bb:cc:dd:ee:ff": "server-1"
-  nodes:                             # optional node display config
-    node-1:
-      label: "Tokyo"
-      pos: [100, 200]
+  bind_addr: ":8080"
 address_families:
   v4:
     enable: true
     bind_addr: "0.0.0.0"
-    # autoip_interface: "eth0"       # auto-detect IP from interface
-    port: 5000
+    communication_port: 5000
   v6:
     enable: true
     bind_addr: "::"
-    port: 5000
+    communication_port: 5000
 allowed_clients:
-  - public_key: "<client pubkey>"
-    name: "node-1"
-    # filters:                       # optional per-client Lua filters
-    #   input_mcast: |
-    #     function filter(pkt) return true end
+  - client_id: "<client pubkey>"
+    client_name: "node-1"
+# static_costs:                      # populated by "vxscli cost store"
+#   node-1:
+#     node-2:
+#       v4: 12.5
+```
+
+## Modes
+
+```
+vxlan-controller --mode <mode> [options]
+
+  controller    Run as VXLAN controller (alias: server)
+  client        Run as VXLAN client
+  keygen        Key generation (genkey/pubkey)
+  vxscli        Controller CLI (cost get/setmode/store)
+  vxccli        Client CLI (af list/get/set)
+  autogen       Generate configs from topology file
 ```
 
 ## Tests

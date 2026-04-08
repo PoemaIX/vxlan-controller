@@ -60,8 +60,10 @@ func main() {
 		runVxscli(*sockPath, flag.Args())
 	case "vxccli":
 		runVxccli(*sockPath, flag.Args())
+	case "autogen":
+		runAutogen(*configPath)
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode <controller|client|keygen|vxscli|vxccli> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode <controller|client|keygen|vxscli|vxccli|autogen> [options]")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Modes:")
 		fmt.Fprintln(os.Stderr, "  controller  Run as VXLAN controller (alias: server)")
@@ -69,6 +71,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  keygen      Key generation (genkey/pubkey)")
 		fmt.Fprintln(os.Stderr, "  vxscli      Controller CLI (cost get/setmode/store)")
 		fmt.Fprintln(os.Stderr, "  vxccli      Client CLI (af list/get/set)")
+		fmt.Fprintln(os.Stderr, "  autogen     Generate configs from topology file")
 		fmt.Fprintln(os.Stderr)
 		flag.PrintDefaults()
 		os.Exit(1)
@@ -212,4 +215,15 @@ func runKeygen(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode keygen <genkey|pubkey> [key]")
 		os.Exit(1)
 	}
+}
+
+func runAutogen(configPath string) {
+	if configPath == "" {
+		configPath = "topology.yaml"
+	}
+	fmt.Println("generating configs from", configPath)
+	if err := config.Autogen(configPath); err != nil {
+		log.Fatalf("Autogen error: %v", err)
+	}
+	fmt.Println("done")
 }

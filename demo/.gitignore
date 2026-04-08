@@ -1,0 +1,3 @@
+# Generated configs from autogen
+*.controller.yaml
+*.client.yaml

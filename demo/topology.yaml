@@ -1,0 +1,57 @@
+# Demo topology for autogen mode
+#
+# Usage:
+#   vxlan-controller --mode autogen --config demo/topology.yaml
+#
+# This generates one .controller.yaml and/or .client.yaml per node
+# in the same directory as this file.
+#
+# Bind value detection:
+#   - IP address (e.g. "10.0.1.1")      → bind_addr
+#   - Interface name (e.g. "eth0")       → autoip_interface
+#
+# DDNS:
+#   - Required for controllers using autoip_interface
+#   - Optional otherwise; defaults to bind IP for controllers
+#   - Used as the address clients connect to (controller endpoint)
+
+vxlan_dst_port: 4789
+vxlan_src_port_start: 4789
+vxlan_src_port_end: 4789
+communication_port: 5000
+vxlan_vni: 100
+vxlan_mtu: 1400
+probe_port: 5010
+
+nodes:
+  # Tokyo - dual-stack controller + client
+  # v4 behind NAT, use ddns for public reachable address
+  tokyo:
+    v4:
+      bind: 10.0.1.1
+      ddns: tokyo.example.com
+    v6: "2001:db8:1::1"
+
+  # Osaka - dual-stack controller + client
+  osaka:
+    v4: 203.0.113.10
+    v6: "2001:db8:2::1"
+
+  # Seoul - v4-only client
+  seoul:
+    v4: 198.51.100.20
+
+  # Singapore - dual-stack client, v6 via autoip
+  singapore:
+    v4: 192.0.2.30
+    v6: eth0
+
+controllers:
+  - tokyo
+  - osaka
+
+clients:
+  - tokyo
+  - osaka
+  - seoul
+  - singapore

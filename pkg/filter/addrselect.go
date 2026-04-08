@@ -25,10 +25,12 @@ type AddrSelectEngine struct {
 
 // AddrInfo represents one address on an interface, passed to the Lua select function.
 type AddrInfo struct {
-	IP         string
-	PrefixLen  int
-	Scope      int
-	Deprecated bool
+	IP          string
+	PrefixLen   int
+	Scope       int
+	Deprecated  bool
+	ValidLft    int // seconds remaining, 0 = forever
+	PreferedLft int // seconds remaining, 0 = forever
 }
 
 // NewAddrSelectEngine creates an engine from a Lua script string.
@@ -81,6 +83,8 @@ func (e *AddrSelectEngine) Select(addrs []AddrInfo, prevIP string, iface string)
 		entry.RawSetString("prefix_len", lua.LNumber(a.PrefixLen))
 		entry.RawSetString("scope", lua.LNumber(a.Scope))
 		entry.RawSetString("deprecated", lua.LBool(a.Deprecated))
+		entry.RawSetString("valid_lft", lua.LNumber(a.ValidLft))
+		entry.RawSetString("prefered_lft", lua.LNumber(a.PreferedLft))
 		addrsTable.RawSetInt(i+1, entry)
 	}
 	info.RawSetString("addrs", addrsTable)
@@ -140,10 +144,12 @@ func GetInterfaceAddrs(ifaceName string, af string) []AddrInfo {
 		}
 		ones, _ := a.Mask.Size()
 		result = append(result, AddrInfo{
-			IP:         ip.String(),
-			PrefixLen:  ones,
-			Scope:      int(a.Scope),
-			Deprecated: a.Flags&unix.IFA_F_DEPRECATED != 0,
+			IP:          ip.String(),
+			PrefixLen:   ones,
+			Scope:       int(a.Scope),
+			Deprecated:  a.Flags&unix.IFA_F_DEPRECATED != 0,
+			ValidLft:    a.ValidLft,
+			PreferedLft: a.PreferedLft,
 		})
 	}
 	return result
