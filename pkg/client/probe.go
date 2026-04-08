@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"math"
 	"net"
 	"net/netip"
@@ -120,6 +121,25 @@ func (c *Client) handleProbeHandshake(af types.AFName, conn *net.UDPConn, data [
 	if err != nil {
 		return
 	}
+
+	// Tie-breaking: if we also have a pending outbound handshake to this
+	// peer, both sides sent HandshakeInit simultaneously.  Compare public
+	// keys to elect a single initiator — the side with the larger key wins
+	// and keeps its initiator role; the other side becomes the responder.
+	peerID := types.ClientID(session.PeerID)
+	c.pendingHandshakesMu.Lock()
+	_, hasPending := c.pendingHandshakes[peerID]
+	if hasPending {
+		if bytes.Compare(c.ClientID[:], peerID[:]) > 0 {
+			// We win → stay initiator, ignore this inbound init
+			c.pendingHandshakesMu.Unlock()
+			return
+		}
+		// We lose → abandon our outbound handshake, become responder
+		delete(c.pendingHandshakes, peerID)
+	}
+	c.pendingHandshakesMu.Unlock()
+
 	session.IsUDP = true
 	c.probeSessions.AddSession(session)
 	conn.WriteToUDP(respMsg, remoteAddr)
