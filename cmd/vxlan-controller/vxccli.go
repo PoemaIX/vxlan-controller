@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"vxlan-controller/pkg/apisock"
 	"vxlan-controller/pkg/config"
@@ -182,6 +183,13 @@ func vxccliPeerList(sockPath string) {
 		return
 	}
 
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ClientName != result[j].ClientName {
+			return result[i].ClientName < result[j].ClientName
+		}
+		return result[i].ClientID < result[j].ClientID
+	})
+
 	for _, peer := range result {
 		name := peer.ClientName
 		if name == "" {
@@ -189,13 +197,15 @@ func vxccliPeerList(sockPath string) {
 		}
 		fmt.Printf("%s (%s)  last_seen=%s\n", name, peer.ClientID, peer.LastSeen)
 
-		for af, ep := range peer.Endpoints {
+		for _, af := range sortedKeys(peer.Endpoints) {
+			ep := peer.Endpoints[af]
 			fmt.Printf("  %s: %s:%d\n", af, ep.IP, ep.ProbePort)
 		}
 
 		if peer.Probe != nil {
 			fmt.Printf("  probe_time=%s\n", peer.Probe.Time)
-			for af, pr := range peer.Probe.AFResults {
+			for _, af := range sortedKeys(peer.Probe.AFResults) {
+				pr := peer.Probe.AFResults[af]
 				lossStr := fmt.Sprintf("%.2f", pr.PacketLoss)
 				if pr.PacketLoss >= 1.0 {
 					lossStr = "1.00 (unreachable)"
