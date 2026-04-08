@@ -203,9 +203,10 @@ func (c *Client) Run() error {
 		return fmt.Errorf("init devices: %w", err)
 	}
 
-	// Step 2c: Initialize VXLAN firewall
+	// Step 2c: Initialize VXLAN firewall (non-fatal; may fail in LXC without full nftables support)
 	if err := c.initFirewall(); err != nil {
-		return fmt.Errorf("init firewall: %w", err)
+		vlog.Warnf("[Client] VXLAN firewall init failed (nftables may not be fully available): %v", err)
+		c.Config.VxlanFirewall = false // disable further firewall operations
 	}
 
 	// Step 3: Collect unique controllers across all AFs
