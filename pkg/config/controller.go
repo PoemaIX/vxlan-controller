@@ -63,9 +63,10 @@ type ProbingConfigFile struct {
 }
 
 type PerClientConfigFile struct {
-	ClientID   string                   `yaml:"client_id"`
-	ClientName string                   `yaml:"client_name"`
-	Filters    *filter.FilterConfigFile `yaml:"filters"`
+	ClientID   string                                `yaml:"client_id"`
+	ClientName string                                `yaml:"client_name"`
+	Filters    *filter.FilterConfigFile              `yaml:"filters"`
+	AFSettings map[string]*types.PerClientAFConfig   `yaml:"af_settings,omitempty"`
 }
 
 // ControllerConfig is the parsed controller configuration.
@@ -223,6 +224,14 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 			return nil, fmt.Errorf("client %s: client_id must be 32 bytes", clientRaw.ClientName)
 		}
 		copy(pc.ClientID[:], pubBytes)
+
+		// Parse per-AF client settings
+		if len(clientRaw.AFSettings) > 0 {
+			pc.AFSettings = make(map[types.AFName]*types.PerClientAFConfig, len(clientRaw.AFSettings))
+			for afStr, afCfg := range clientRaw.AFSettings {
+				pc.AFSettings[types.AFName(afStr)] = afCfg
+			}
+		}
 
 		cfg.AllowedClients = append(cfg.AllowedClients, pc)
 	}

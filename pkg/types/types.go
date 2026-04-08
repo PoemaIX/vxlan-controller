@@ -44,6 +44,12 @@ type PerClientConfig struct {
 	ClientID   ClientID
 	ClientName string
 	Filters    *filter.FilterConfig
+	AFSettings map[AFName]*PerClientAFConfig
+}
+
+// PerClientAFConfig is per-AF settings for a client on the controller.
+type PerClientAFConfig struct {
+	EndpointOverride string `yaml:"endpoint_override,omitempty"`
 }
 
 // ClientInfo is maintained by the Controller for each connected Client.

@@ -430,7 +430,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		c.pushDelta(&pb.ControllerStateUpdate{
 			Update: &pb.ControllerStateUpdate_ClientJoined{
 				ClientJoined: &pb.ClientJoined{
-					ClientInfo: clientInfoToProto(ci),
+					ClientInfo: clientInfoToProto(ci, c.endpointOverrides(clientID)),
 				},
 			},
 		})
@@ -439,7 +439,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		c.pushDelta(&pb.ControllerStateUpdate{
 			Update: &pb.ControllerStateUpdate_ClientInfoUpdate{
 				ClientInfoUpdate: &pb.ClientInfoUpdateProto{
-					ClientInfo: clientInfoToProto(ci),
+					ClientInfo: clientInfoToProto(ci, c.endpointOverrides(clientID)),
 				},
 			},
 		})
@@ -1171,6 +1171,25 @@ func macEqual(a, b net.HardwareAddr) bool {
 		}
 	}
 	return true
+}
+
+// endpointOverrides returns per-AF endpoint overrides for a given client.
+func (c *Controller) endpointOverrides(clientID types.ClientID) map[types.AFName]string {
+	for _, pc := range c.Config.AllowedClients {
+		if pc.ClientID == clientID {
+			if len(pc.AFSettings) == 0 {
+				return nil
+			}
+			m := make(map[types.AFName]string, len(pc.AFSettings))
+			for af, afCfg := range pc.AFSettings {
+				if afCfg.EndpointOverride != "" {
+					m[af] = afCfg.EndpointOverride
+				}
+			}
+			return m
+		}
+	}
+	return nil
 }
 
 func addrFromConn(conn net.Conn) netip.Addr {

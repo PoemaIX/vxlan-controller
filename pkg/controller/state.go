@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -12,6 +13,46 @@ import (
 
 	pb "vxlan-controller/proto"
 )
+
+// DNS resolution cache for endpoint overrides (DDNS support).
+var (
+	dnsCache   = make(map[string]dnsCacheEntry)
+	dnsCacheMu sync.Mutex
+	dnsCacheTTL = 60 * time.Second
+)
+
+type dnsCacheEntry struct {
+	addr    netip.Addr
+	expires time.Time
+}
+
+func cachedResolve(s string) (netip.Addr, error) {
+	// Direct IP: no cache needed
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr, nil
+	}
+
+	dnsCacheMu.Lock()
+	defer dnsCacheMu.Unlock()
+
+	if entry, ok := dnsCache[s]; ok && time.Now().Before(entry.expires) {
+		return entry.addr, nil
+	}
+
+	ips, err := net.LookupHost(s)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if len(ips) == 0 {
+		return netip.Addr{}, fmt.Errorf("no addresses for %s", s)
+	}
+	addr, err := netip.ParseAddr(ips[0])
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	dnsCache[s] = dnsCacheEntry{addr: addr, expires: time.Now().Add(dnsCacheTTL)}
+	return addr, nil
+}
 
 // ControllerState is the global state protected by Controller.mu.
 type ControllerState struct {
@@ -74,7 +115,8 @@ func newControllerState() *ControllerState {
 }
 
 // Snapshot serializes the full ControllerState to protobuf.
-func (cs *ControllerState) Snapshot(controllerID types.ClientID) *pb.ControllerState {
+// overrideFn returns per-AF endpoint overrides for a given client (nil if none).
+func (cs *ControllerState) Snapshot(controllerID types.ClientID, overrideFn func(types.ClientID) map[types.AFName]string) *pb.ControllerState {
 	state := &pb.ControllerState{
 		ClientCount:              uint32(len(cs.Clients)),
 		LastClientChangeTimestamp: cs.LastClientChange.UnixNano(),
@@ -83,7 +125,7 @@ func (cs *ControllerState) Snapshot(controllerID types.ClientID) *pb.ControllerS
 	}
 
 	for id, ci := range cs.Clients {
-		state.Clients[id.Hex()] = clientInfoToProto(ci)
+		state.Clients[id.Hex()] = clientInfoToProto(ci, overrideFn(id))
 	}
 
 	state.RouteMatrix = routeMatrixToProto(cs.RouteMatrix)
@@ -101,7 +143,7 @@ func addrToBytes(a netip.Addr) []byte {
 	return b[:]
 }
 
-func clientInfoToProto(ci *ClientInfo) *pb.ClientInfoProto {
+func clientInfoToProto(ci *ClientInfo, overrides map[types.AFName]string) *pb.ClientInfoProto {
 	p := &pb.ClientInfoProto{
 		ClientId:   ci.ClientID[:],
 		ClientName: ci.ClientName,
@@ -114,7 +156,13 @@ func clientInfoToProto(ci *ClientInfo) *pb.ClientInfoProto {
 			ProbePort:    uint32(ep.ProbePort),
 			VxlanDstPort: uint32(ep.VxlanDstPort),
 		}
-		epProto.Ip = addrToBytes(ep.IP)
+		ip := ep.IP
+		if override, ok := overrides[af]; ok && override != "" {
+			if resolved, err := cachedResolve(override); err == nil {
+				ip = resolved
+			}
+		}
+		epProto.Ip = addrToBytes(ip)
 		p.Endpoints[string(af)] = epProto
 	}
 

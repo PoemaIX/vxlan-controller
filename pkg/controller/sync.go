@@ -91,7 +91,7 @@ func encodeMessage(msgType protocol.MsgType, payload []byte) []byte {
 // getFullStateEncodedForClient returns the full state snapshot, filtered for the given client.
 // Must be called with c.mu held (at least RLock).
 func (c *Controller) getFullStateEncodedForClient(cc *ClientConn) []byte {
-	snapshot := c.State.Snapshot(c.ControllerID)
+	snapshot := c.State.Snapshot(c.ControllerID, c.endpointOverrides)
 
 	// Filter RouteTable for this client
 	if cc.Filters != nil {

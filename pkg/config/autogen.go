@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"vxlan-controller/pkg/crypto"
+	"vxlan-controller/pkg/types"
 
 	"gopkg.in/yaml.v3"
 )
@@ -231,10 +232,26 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 	cfg.AllowedClients = nil
 	for _, clientName := range ag.Clients {
 		ck := keys[clientName]
-		cfg.AllowedClients = append(cfg.AllowedClients, PerClientConfigFile{
+		pc := PerClientConfigFile{
 			ClientID:   base64.StdEncoding.EncodeToString(ck.Pub[:]),
 			ClientName: clientName,
-		})
+		}
+		// Same-node client: connects via LAN IP, but controller should distribute
+		// the public IP/hostname to other clients. Only needed when client == controller node.
+		if clientName == name {
+			for afName, af := range ag.Nodes[clientName] {
+				if af.DDNS == "" {
+					continue
+				}
+				if pc.AFSettings == nil {
+					pc.AFSettings = make(map[string]*types.PerClientAFConfig)
+				}
+				pc.AFSettings[afName] = &types.PerClientAFConfig{
+					EndpointOverride: af.DDNS,
+				}
+			}
+		}
+		cfg.AllowedClients = append(cfg.AllowedClients, pc)
 	}
 
 	return &cfg
@@ -281,11 +298,17 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			if !ok {
 				continue
 			}
-			endpoint, _ := ctrlAF.Endpoint() // already validated
+			// Same node: connect via bind addr (LAN); different node: use ddns/endpoint
+			var addr string
+			if ctrlName == name {
+				addr = ctrlAF.Bind
+			} else {
+				addr, _ = ctrlAF.Endpoint() // already validated
+			}
 			ck := keys[ctrlName]
 			afCfg.Controllers = append(afCfg.Controllers, ControllerEndpointFile{
 				PubKey: base64.StdEncoding.EncodeToString(ck.Pub[:]),
-				Addr:   formatAddrPort(endpoint, ag.CommunicationPort),
+				Addr:   formatAddrPort(addr, ag.CommunicationPort),
 			})
 		}
 
