@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"sort"
+	"strconv"
 
 	"vxlan-controller/pkg/apisock"
 	"vxlan-controller/pkg/config"
@@ -199,7 +201,7 @@ func vxccliPeerList(sockPath string) {
 
 		for _, af := range sortedKeys(peer.Endpoints) {
 			ep := peer.Endpoints[af]
-			fmt.Printf("  %s: %s:%d\n", af, ep.IP, ep.ProbePort)
+			fmt.Printf("  %s: %s\n", af, net.JoinHostPort(ep.IP, strconv.Itoa(int(ep.ProbePort))))
 		}
 
 		if peer.Probe != nil {
