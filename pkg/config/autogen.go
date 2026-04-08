@@ -14,14 +14,18 @@ import (
 
 // AutogenConfig is the topology file for generating controller+client configs.
 type AutogenConfig struct {
-	VxlanDstPort      uint16 `yaml:"vxlan_dst_port"`
-	VxlanSrcPortStart uint16 `yaml:"vxlan_src_port_start"`
-	VxlanSrcPortEnd   uint16 `yaml:"vxlan_src_port_end"`
-	CommunicationPort uint16 `yaml:"communication_port"`
-	VxlanVNI          uint32 `yaml:"vxlan_vni"`
-	VxlanMTU          int    `yaml:"vxlan_mtu"`
-	ProbePort         uint16 `yaml:"probe_port"`
-	Priority          int    `yaml:"priority"`
+	BridgeName        string  `yaml:"bridge_name"`
+	ClampMSSToMTU     *bool   `yaml:"clamp_mss_to_mtu"`
+	VxlanFirewall     *bool   `yaml:"vxlan_firewall"`
+	VxlanNamePrefix   string  `yaml:"vxlan_name_prefix"`
+	VxlanDstPort      uint16  `yaml:"vxlan_dst_port"`
+	VxlanSrcPortStart uint16  `yaml:"vxlan_src_port_start"`
+	VxlanSrcPortEnd   uint16  `yaml:"vxlan_src_port_end"`
+	CommunicationPort uint16  `yaml:"communication_port"`
+	VxlanVNI          uint32  `yaml:"vxlan_vni"`
+	VxlanMTU          int     `yaml:"vxlan_mtu"`
+	ProbePort         uint16  `yaml:"probe_port"`
+	Priority          int     `yaml:"priority"`
 	AdditionalCost    float64 `yaml:"additional_cost"`
 
 	Nodes       map[string]map[string]AutogenAF `yaml:"nodes"`
@@ -89,6 +93,12 @@ func Autogen(path string) error {
 	}
 
 	// Apply defaults
+	if ag.BridgeName == "" {
+		ag.BridgeName = "br-vxlan"
+	}
+	if ag.VxlanNamePrefix == "" {
+		ag.VxlanNamePrefix = "vxlan-"
+	}
 	if ag.VxlanDstPort == 0 {
 		ag.VxlanDstPort = 4789
 	}
@@ -236,6 +246,13 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 
 	cfg.PrivateKey = base64.StdEncoding.EncodeToString(k.Priv[:])
 	cfg.PublicKey = base64.StdEncoding.EncodeToString(k.Pub[:])
+	cfg.BridgeName = ag.BridgeName
+	if ag.ClampMSSToMTU != nil {
+		cfg.ClampMSSToMTU = *ag.ClampMSSToMTU
+	}
+	if ag.VxlanFirewall != nil {
+		cfg.VxlanFirewall = *ag.VxlanFirewall
+	}
 
 	// AF settings from this node's AFs
 	cfg.AFSettings = make(map[string]*ClientAFConfigFile)
@@ -243,7 +260,7 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 		afCfg := &ClientAFConfigFile{
 			Enable:            true,
 			ProbePort:         ag.ProbePort,
-			VxlanName:         "vxlan-" + afName,
+			VxlanName:         ag.VxlanNamePrefix + afName,
 			VxlanVNI:          ag.VxlanVNI,
 			VxlanMTU:          ag.VxlanMTU,
 			VxlanDstPort:      ag.VxlanDstPort,

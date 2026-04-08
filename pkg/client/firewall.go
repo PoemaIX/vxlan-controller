@@ -99,7 +99,8 @@ func (c *Client) cleanupFirewall() {
 	if !c.Config.VxlanFirewall {
 		return
 	}
-	exec.Command("nft", "destroy", "table", "inet", c.fwTable()).Run()
+	// Use "delete" (not "destroy") for nftables <1.0 compat; ignore error if table doesn't exist.
+	exec.Command("nft", "delete", "table", "inet", c.fwTable()).Run()
 	vlog.Infof("[Firewall] VXLAN firewall cleaned up")
 }
 
@@ -149,7 +150,9 @@ func (c *Client) buildFirewallRuleset(perAF map[types.AFName][]string) string {
 	var sb strings.Builder
 
 	tbl := c.fwTable()
-	sb.WriteString(fmt.Sprintf("destroy table inet %s\n", tbl))
+	// Delete existing table first (ignore error if it doesn't exist).
+	// Using separate command instead of "destroy" for nftables <1.0 compat.
+	exec.Command("nft", "delete", "table", "inet", tbl).Run()
 	sb.WriteString(fmt.Sprintf("table inet %s {\n", tbl))
 
 	// Per-AF sets

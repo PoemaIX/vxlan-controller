@@ -234,7 +234,8 @@ func (c *Client) setupNftables() error {
 }
 
 func (c *Client) cleanupNftables() {
-	exec.Command("nft", "destroy", "table", "bridge", c.Config.ClampMSSTable).Run()
+	// Use "delete" (not "destroy") for nftables <1.0 compat; ignore error if table doesn't exist.
+	exec.Command("nft", "delete", "table", "bridge", c.Config.ClampMSSTable).Run()
 }
 
 func (c *Client) updateVxlanBindAddr(af types.AFName, newAddr string) error {
