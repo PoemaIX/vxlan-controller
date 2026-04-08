@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -28,6 +29,8 @@ type Session struct {
 	RecvWindow SlidingWindow
 	PeerID     [32]byte
 	IsUDP      bool // determines which recv counter to use
+	CreatedAt  time.Time
+	LastRecv   time.Time
 }
 
 // Encrypt encrypts plaintext using ChaCha20-Poly1305 with counter-based nonce.
@@ -75,6 +78,7 @@ func (s *Session) Decrypt(ciphertext []byte, counter uint64) ([]byte, error) {
 		return nil, ErrDecryptFailed
 	}
 
+	s.LastRecv = time.Now()
 	return plaintext, nil
 }
 
@@ -110,6 +114,10 @@ func (sm *SessionManager) AddSession(s *Session) {
 		delete(sm.sessions, old.LocalIndex)
 	}
 
+	now := time.Now()
+	s.CreatedAt = now
+	s.LastRecv = now
+
 	sm.sessions[s.LocalIndex] = s
 	sm.byPeer[s.PeerID] = s
 }
@@ -126,6 +134,23 @@ func (sm *SessionManager) FindByPeer(peerID [32]byte) *Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.byPeer[peerID]
+}
+
+// ExpireByPeer removes a session if LastRecv is older than maxAge.
+// Returns true if the session was expired (or didn't exist).
+func (sm *SessionManager) ExpireByPeer(peerID [32]byte, maxAge time.Duration) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s, ok := sm.byPeer[peerID]
+	if !ok {
+		return true
+	}
+	if time.Since(s.LastRecv) <= maxAge {
+		return false
+	}
+	delete(sm.sessions, s.LocalIndex)
+	delete(sm.byPeer, peerID)
+	return true
 }
 
 // RemoveByPeer removes a session by peer ID.

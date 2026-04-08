@@ -290,6 +290,14 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 					continue
 				}
 
+				// Expire stale session (no successful decrypt for 30-45s).
+				// Jitter derived from our own ClientID byte so each client
+				// gets a different but stable expiry, avoiding synchronized
+				// re-handshake collisions.
+				jitter := int(c.ClientID[0]) * 15000 / 256
+				expiry := 30*time.Second + time.Duration(jitter)*time.Millisecond
+				c.probeSessions.ExpireByPeer(peer.clientID, expiry)
+
 				// Ensure we have a probe session with this peer
 				session := c.probeSessions.FindByPeer(peer.clientID)
 				if session == nil {
