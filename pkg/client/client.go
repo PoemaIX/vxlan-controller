@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"vxlan-controller/pkg/vlog"
@@ -9,12 +10,12 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"vxlan-controller/pkg/apisock"
 	"vxlan-controller/pkg/config"
 	"vxlan-controller/pkg/controller"
 	"vxlan-controller/pkg/crypto"
@@ -942,93 +943,112 @@ func clientEncodeMessage(msgType protocol.MsgType, payload []byte) []byte {
 }
 
 func (c *Client) apiServer() {
-	socketPath := fmt.Sprintf("/tmp/vxlan-client-%s.sock", c.ClientID.Hex()[:8])
-	os.Remove(socketPath)
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		vlog.Errorf("[Client] API server listen error: %v", err)
-		return
+	sockPath := c.Config.APISocket
+	if sockPath == "" {
+		sockPath = config.DefaultClientSocket
 	}
-	defer listener.Close()
-	defer os.Remove(socketPath)
 
-	vlog.Debugf("[Client] API server listening on %s", socketPath)
-
-	go func() {
-		<-c.ctx.Done()
-		listener.Close()
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-				continue
-			}
-		}
-		go c.handleAPIConn(conn)
+	if err := apisock.ListenAndServe(c.ctx, sockPath, c.handleAPI); err != nil {
+		vlog.Errorf("[Client] API server error: %v", err)
 	}
 }
 
-func (c *Client) handleAPIConn(conn net.Conn) {
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return
-	}
-
-	line := strings.TrimSpace(string(buf[:n]))
-	parts := strings.Fields(line)
-	if len(parts) == 0 {
-		conn.Write([]byte("ERROR: empty command\n"))
-		return
-	}
-
-	switch parts[0] {
-	case "UPDATE_BIND_ADDR":
-		// UPDATE_BIND_ADDR <af> <new_addr>
-		if len(parts) != 3 {
-			conn.Write([]byte("ERROR: usage: UPDATE_BIND_ADDR <af> <new_addr>\n"))
-			return
-		}
-		af := types.AFName(parts[1])
-		newAddr, err := netip.ParseAddr(parts[2])
-		if err != nil {
-			conn.Write([]byte(fmt.Sprintf("ERROR: invalid addr: %v\n", err)))
-			return
-		}
-		if err := c.updateBindAddr(af, newAddr); err != nil {
-			conn.Write([]byte(fmt.Sprintf("ERROR: %v\n", err)))
-			return
-		}
-		conn.Write([]byte("OK\n"))
-
-	case "GET_BIND_ADDR":
-		// GET_BIND_ADDR <af>
-		if len(parts) != 2 {
-			conn.Write([]byte("ERROR: usage: GET_BIND_ADDR <af>\n"))
-			return
-		}
-		af := types.AFName(parts[1])
-		c.mu.Lock()
-		afCfg, ok := c.Config.AFSettings[af]
-		c.mu.Unlock()
-		if !ok {
-			conn.Write([]byte("ERROR: unknown AF\n"))
-			return
-		}
-		conn.Write([]byte(fmt.Sprintf("OK %s\n", afCfg.BindAddr)))
-
+func (c *Client) handleAPI(method string, params json.RawMessage) (interface{}, error) {
+	switch method {
+	case "af.list":
+		return c.apiAFList()
+	case "af.get":
+		return c.apiAFGet(params)
+	case "af.set":
+		return c.apiAFSet(params)
 	default:
-		conn.Write([]byte("ERROR: unknown command\n"))
+		return nil, fmt.Errorf("unknown method: %s", method)
 	}
+}
+
+type afInfo struct {
+	AF       string `json:"af"`
+	BindAddr string `json:"bind_addr"`
+	AutoIP   string `json:"autoip,omitempty"` // interface name if autoip mode
+}
+
+func (c *Client) apiAFList() ([]afInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var result []afInfo
+	for afName, afCfg := range c.Config.AFSettings {
+		if !afCfg.Enable {
+			continue
+		}
+		info := afInfo{
+			AF:       string(afName),
+			BindAddr: afCfg.BindAddr.String(),
+			AutoIP:   afCfg.AutoIPInterface,
+		}
+		result = append(result, info)
+	}
+	return result, nil
+}
+
+type afGetParams struct {
+	AF string `json:"af"`
+}
+
+func (c *Client) apiAFGet(params json.RawMessage) (*afInfo, error) {
+	var p afGetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+
+	c.mu.Lock()
+	afCfg, ok := c.Config.AFSettings[types.AFName(p.AF)]
+	c.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown AF: %s", p.AF)
+	}
+
+	return &afInfo{
+		AF:       p.AF,
+		BindAddr: afCfg.BindAddr.String(),
+		AutoIP:   afCfg.AutoIPInterface,
+	}, nil
+}
+
+type afSetParams struct {
+	AF   string `json:"af"`
+	Addr string `json:"addr"`
+}
+
+func (c *Client) apiAFSet(params json.RawMessage) (interface{}, error) {
+	var p afSetParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+
+	af := types.AFName(p.AF)
+	c.mu.Lock()
+	afCfg, ok := c.Config.AFSettings[af]
+	if ok && afCfg.AutoIPInterface != "" {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("AF %s uses autoip_interface, cannot set bind_addr manually", p.AF)
+	}
+	c.mu.Unlock()
+
+	if !ok {
+		return nil, fmt.Errorf("unknown AF: %s", p.AF)
+	}
+
+	newAddr, err := netip.ParseAddr(p.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid addr: %w", err)
+	}
+
+	if err := c.updateBindAddr(af, newAddr); err != nil {
+		return nil, err
+	}
+
+	return map[string]string{"af": p.AF, "bind_addr": newAddr.String()}, nil
 }
 
 func (c *Client) updateBindAddr(af types.AFName, newAddr netip.Addr) error {

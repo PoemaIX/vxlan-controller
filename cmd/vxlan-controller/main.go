@@ -21,11 +21,12 @@ import (
 var Version = "dev"
 
 func main() {
-	mode := flag.String("mode", "", "run mode: controller, client, or keygen")
+	mode := flag.String("mode", "", "run mode: controller, client, keygen, vxscli, vxccli")
 	configPath := flag.String("config", "", "path to config file")
 	defaultConfig := flag.Bool("default-config", false, "print default config and exit (controller/client modes)")
 	mockMode := flag.Bool("mock", false, "run controller in mock mode for WebUI demo")
 	logLevel := flag.String("log-level", "", "log level: error, warn, info, debug, verbose (overrides config)")
+	sockPath := flag.String("sock", "", "Unix socket path (overrides default for vxscli/vxccli)")
 	version := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -41,13 +42,19 @@ func main() {
 		runClient(*configPath, *defaultConfig, *logLevel)
 	case "keygen":
 		runKeygen(flag.Args())
+	case "vxscli":
+		runVxscli(*sockPath, flag.Args())
+	case "vxccli":
+		runVxccli(*sockPath, flag.Args())
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode <controller|client|keygen> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode <controller|client|keygen|vxscli|vxccli> [options]")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Modes:")
 		fmt.Fprintln(os.Stderr, "  controller  Run as VXLAN controller (alias: server)")
 		fmt.Fprintln(os.Stderr, "  client      Run as VXLAN client")
 		fmt.Fprintln(os.Stderr, "  keygen      Key generation (genkey/pubkey)")
+		fmt.Fprintln(os.Stderr, "  vxscli      Controller CLI (cost get/setmode/store)")
+		fmt.Fprintln(os.Stderr, "  vxccli      Client CLI (af list/get/set)")
 		fmt.Fprintln(os.Stderr)
 		flag.PrintDefaults()
 		os.Exit(1)

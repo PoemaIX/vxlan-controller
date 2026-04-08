@@ -1,13 +1,27 @@
 package config
 
-import "gopkg.in/yaml.v3"
+import (
+	"encoding/base64"
+
+	"vxlan-controller/pkg/crypto"
+
+	"gopkg.in/yaml.v3"
+)
 
 func DefaultClientConfigYAML() ([]byte, error) {
-	return yaml.Marshal(&DefaultClientConfig)
+	cfg := DefaultClientConfig
+	priv, pub := crypto.GenerateKeyPair()
+	cfg.PrivateKey = base64.StdEncoding.EncodeToString(priv[:])
+	cfg.PublicKey = base64.StdEncoding.EncodeToString(pub[:])
+	return yaml.Marshal(&cfg)
 }
 
 func DefaultControllerConfigYAML() ([]byte, error) {
-	return yaml.Marshal(&DefaultControllerConfig)
+	cfg := DefaultControllerConfig
+	priv, pub := crypto.GenerateKeyPair()
+	cfg.PrivateKey = base64.StdEncoding.EncodeToString(priv[:])
+	cfg.PublicKey = base64.StdEncoding.EncodeToString(pub[:])
+	return yaml.Marshal(&cfg)
 }
 
 var DefaultNTPServers = []string{
@@ -22,15 +36,23 @@ var DefaultNTPServers = []string{
 	"ntp.ubuntu.com",
 }
 
+const (
+	DefaultControllerSocket = "/var/run/vxlan-controller.sock"
+	DefaultClientSocket     = "/var/run/vxlan-client.sock"
+)
+
 var DefaultClientConfig = ClientConfigFile{
-	PrivateKey:       "<base64 private key from: wg genkey>",
-	BridgeName:       "br-vxlan",
-	ClampMSSToMTU:    false,
-	NeighSuppress:    false,
-	InitTimeout:      10,
-	StatsIntervalS:   5,
-	NTPServers:       DefaultNTPServers,
-	NTPPeriodH:       23,
+	PrivateKey:         "<base64 private key from: wg genkey>",
+	BridgeName:         "br-vxlan",
+	ClampMSSToMTU:      false,
+	ClampMSSTable:      "vxlan_mss",
+	NeighSuppress:      false,
+	VxlanFirewall:      false,
+	VxlanFirewallTable: "vxlan_fw",
+	InitTimeout:        10,
+	StatsIntervalS:     5,
+	NTPServers:         DefaultNTPServers,
+	NTPPeriodH:         23,
 	AFSettings: map[string]*ClientAFConfigFile{
 		"v4": {
 			Enable:            true,
@@ -71,6 +93,7 @@ var DefaultClientConfig = ClientConfigFile{
 
 var DefaultControllerConfig = ControllerConfigFile{
 	PrivateKey:                "<base64 private key from: wg genkey>",
+	CostMode:                 "probe",
 	ClientOfflineTimeout:      30,
 	SyncNewClientDebounce:     3,
 	SyncNewClientDebounceMax:  10,

@@ -17,6 +17,7 @@ import (
 
 type ClientConfigFile struct {
 	PrivateKey        string                          `yaml:"private_key"`
+	PublicKey         string                          `yaml:"public_key,omitempty"`
 	BridgeName        string                          `yaml:"bridge_name"`
 	ClampMSSToMTU      bool                            `yaml:"clamp_mss_to_mtu"`
 	ClampMSSTable      string                          `yaml:"clamp_mss_table"`
@@ -30,6 +31,7 @@ type ClientConfigFile struct {
 	NTPPeriodH        int                             `yaml:"ntp_period_h"`
 	Filters           *filter.FilterConfigFile         `yaml:"filters"`
 	LogLevel          string                          `yaml:"log_level"`
+	APISocket         string                          `yaml:"api_socket"`
 }
 
 type ClientAFConfigFile struct {
@@ -72,6 +74,7 @@ type ClientConfig struct {
 	NTPPeriod        time.Duration
 	Filters          *filter.FilterConfig
 	LogLevel         string
+	APISocket        string
 }
 
 type ClientAFConfig struct {
@@ -112,36 +115,20 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
 
-	if len(raw.NTPServers) == 0 {
-		raw.NTPServers = DefaultNTPServers
-	}
-
-	statsInterval := raw.StatsIntervalS
-	if statsInterval <= 0 {
-		statsInterval = 5
-	}
-
 	cfg := &ClientConfig{
-		BridgeName:       raw.BridgeName,
-		ClampMSSToMTU:    raw.ClampMSSToMTU,
-		ClampMSSTable:    raw.ClampMSSTable,
-		NeighSuppress:    raw.NeighSuppress,
+		BridgeName:         raw.BridgeName,
+		ClampMSSToMTU:      raw.ClampMSSToMTU,
+		ClampMSSTable:      raw.ClampMSSTable,
+		NeighSuppress:      raw.NeighSuppress,
 		VxlanFirewall:      raw.VxlanFirewall,
 		VxlanFirewallTable: raw.VxlanFirewallTable,
-		NTPServers:        raw.NTPServers,
-		InitTimeout:      time.Duration(raw.InitTimeout) * time.Second,
-		StatsInterval:    time.Duration(statsInterval) * time.Second,
-		NTPPeriod:        time.Duration(raw.NTPPeriodH) * time.Hour,
-		Filters:          filter.ParseFilterConfigFile(raw.Filters, configDir),
-		LogLevel:         raw.LogLevel,
-	}
-
-	// Default nftables table names
-	if cfg.ClampMSSToMTU && cfg.ClampMSSTable == "" {
-		cfg.ClampMSSTable = "vxlan_mss"
-	}
-	if cfg.VxlanFirewall && cfg.VxlanFirewallTable == "" {
-		cfg.VxlanFirewallTable = "vxlan_fw"
+		NTPServers:         raw.NTPServers,
+		InitTimeout:        time.Duration(raw.InitTimeout) * time.Second,
+		StatsInterval:      time.Duration(raw.StatsIntervalS) * time.Second,
+		NTPPeriod:          time.Duration(raw.NTPPeriodH) * time.Hour,
+		Filters:            filter.ParseFilterConfigFile(raw.Filters, configDir),
+		LogLevel:           raw.LogLevel,
+		APISocket:          raw.APISocket,
 	}
 
 	// Parse private key
@@ -158,10 +145,6 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 	cfg.AFSettings = make(map[types.AFName]*ClientAFConfig)
 	for name, afRaw := range raw.AFSettings {
 		afName := types.AFName(name)
-		additionalCost := afRaw.AdditionalCost
-		if additionalCost == 0 {
-			additionalCost = 20
-		}
 		af := &ClientAFConfig{
 			Name:              afName,
 			Enable:            afRaw.Enable,
@@ -174,7 +157,7 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 			VxlanSrcPortStart: afRaw.VxlanSrcPortStart,
 			VxlanSrcPortEnd:   afRaw.VxlanSrcPortEnd,
 			Priority:          afRaw.Priority,
-			AdditionalCost:    additionalCost,
+			AdditionalCost:    afRaw.AdditionalCost,
 		}
 
 		hasBindAddr := afRaw.BindAddr != ""

@@ -122,6 +122,55 @@ func ComputeBestPaths(m map[ClientID]map[ClientID]*LatencyInfo) map[ClientID]map
 	return result
 }
 
+// ComputeBestPathsStatic computes best paths using static costs.
+// Probed LatencyMatrix is still used for reachability: if an AF has PacketLoss == 1.0,
+// it is considered unreachable even if a static cost is defined.
+// staticCosts is indexed by ClientID: [src][dst][af] -> cost.
+func ComputeBestPathsStatic(
+	latencyMatrix map[ClientID]map[ClientID]*LatencyInfo,
+	staticCosts map[ClientID]map[ClientID]map[AFName]float64,
+) map[ClientID]map[ClientID]*BestPathEntry {
+	result := make(map[ClientID]map[ClientID]*BestPathEntry)
+
+	for src, dsts := range staticCosts {
+		row := make(map[ClientID]*BestPathEntry)
+		for dst, afs := range dsts {
+			var bestAF AFName
+			bestCost := INF_LATENCY
+
+			for af, cost := range afs {
+				// Check reachability from probe data
+				if li, ok := latencyMatrix[src]; ok {
+					if info, ok := li[dst]; ok {
+						if al, ok := info.AFs[af]; ok && al.PacketLoss >= 1.0 {
+							continue // unreachable
+						}
+					}
+				}
+				if cost < bestCost {
+					bestCost = cost
+					bestAF = af
+				}
+			}
+
+			if bestAF != "" {
+				var raw *AFLatency
+				if li, ok := latencyMatrix[src]; ok {
+					if info, ok := li[dst]; ok {
+						raw = info.AFs[bestAF]
+					}
+				}
+				row[dst] = &BestPathEntry{AF: bestAF, Cost: bestCost, Raw: raw}
+			}
+		}
+		if len(row) > 0 {
+			result[src] = row
+		}
+	}
+
+	return result
+}
+
 // RouteEntry is a single cell in RouteMatrix.
 type RouteEntry struct {
 	NextHop ClientID

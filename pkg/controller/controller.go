@@ -71,6 +71,10 @@ type Controller struct {
 
 	// Addr watch engines for autoip_interface
 	addrEngines map[types.AFName]*filter.AddrSelectEngine
+
+	// Cost mode: "probe" or "static"
+	CostMode       string
+	staticCostsByID map[types.ClientID]map[types.ClientID]map[types.AFName]float64
 }
 
 type udpAddrKey struct {
@@ -109,6 +113,15 @@ func New(cfg *config.ControllerConfig) *Controller {
 	// Build allowed keys list
 	for _, pc := range cfg.AllowedClients {
 		c.allowedKeys = append(c.allowedKeys, pc.ClientID)
+	}
+
+	// Init cost mode
+	c.CostMode = cfg.CostMode
+	if c.CostMode == "" {
+		c.CostMode = "probe"
+	}
+	if cfg.StaticCosts != nil {
+		c.staticCostsByID = c.resolveStaticCosts(cfg.StaticCosts)
 	}
 
 	// Init addr select engines for AFs with AutoIPInterface
@@ -162,6 +175,9 @@ func (c *Controller) Run() error {
 
 	// Start addr watch loop for autoip_interface
 	go c.addrWatchLoop()
+
+	// Start API server
+	go c.apiServer()
 
 	<-c.ctx.Done()
 	return nil
@@ -728,7 +744,7 @@ func (c *Controller) triggerTopologyUpdate() {
 	}
 
 	// Precompute best paths, then run Floyd-Warshall
-	c.State.BestPaths = types.ComputeBestPaths(c.State.LatencyMatrix)
+	c.State.BestPaths = c.computeCurrentBestPaths()
 	newRM := computeRouteMatrix(c.State.BestPaths, c.State.Clients)
 	c.State.RouteMatrix = newRM
 
@@ -908,7 +924,7 @@ func (c *Controller) checkOfflineClients() {
 		c.updateRouteTable()
 
 		// Recompute routes
-		c.State.BestPaths = types.ComputeBestPaths(c.State.LatencyMatrix)
+		c.State.BestPaths = c.computeCurrentBestPaths()
 		newRM := computeRouteMatrix(c.State.BestPaths, c.State.Clients)
 		c.State.RouteMatrix = newRM
 
@@ -1163,4 +1179,51 @@ func addrFromConn(conn net.Conn) netip.Addr {
 		return addr
 	}
 	return netip.Addr{}
+}
+
+// computeCurrentBestPaths selects between probe and static cost computation.
+// Must be called with c.mu held.
+func (c *Controller) computeCurrentBestPaths() map[types.ClientID]map[types.ClientID]*types.BestPathEntry {
+	if c.CostMode == "static" && c.staticCostsByID != nil {
+		return types.ComputeBestPathsStatic(c.State.LatencyMatrix, c.staticCostsByID)
+	}
+	return types.ComputeBestPaths(c.State.LatencyMatrix)
+}
+
+// resolveStaticCosts converts name-indexed static costs to ClientID-indexed.
+func (c *Controller) resolveStaticCosts(nameCosts map[string]map[string]map[types.AFName]float64) map[types.ClientID]map[types.ClientID]map[types.AFName]float64 {
+	nameToID := make(map[string]types.ClientID)
+	for _, pc := range c.Config.AllowedClients {
+		nameToID[pc.ClientName] = pc.ClientID
+	}
+
+	result := make(map[types.ClientID]map[types.ClientID]map[types.AFName]float64)
+	for srcName, dsts := range nameCosts {
+		srcID, ok := nameToID[srcName]
+		if !ok {
+			continue
+		}
+		result[srcID] = make(map[types.ClientID]map[types.AFName]float64)
+		for dstName, afs := range dsts {
+			dstID, ok := nameToID[dstName]
+			if !ok {
+				continue
+			}
+			result[srcID][dstID] = make(map[types.AFName]float64)
+			for af, cost := range afs {
+				result[srcID][dstID][af] = cost
+			}
+		}
+	}
+	return result
+}
+
+// clientNameByID returns the human-readable name for a ClientID.
+func (c *Controller) clientNameByID(id types.ClientID) string {
+	for _, pc := range c.Config.AllowedClients {
+		if pc.ClientID == id {
+			return pc.ClientName
+		}
+	}
+	return id.Hex()[:8]
 }

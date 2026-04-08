@@ -17,6 +17,7 @@ import (
 
 type ControllerConfigFile struct {
 	PrivateKey             string                              `yaml:"private_key"`
+	PublicKey              string                              `yaml:"public_key,omitempty"`
 	AFSettings             map[string]*ControllerAFConfigFile  `yaml:"address_families"`
 	ClientOfflineTimeout   int                                 `yaml:"client_offline_timeout"`
 	SyncNewClientDebounce  int                                 `yaml:"sync_new_client_debounce"`
@@ -27,6 +28,9 @@ type ControllerConfigFile struct {
 	AllowedClients         []PerClientConfigFile               `yaml:"allowed_clients"`
 	LogLevel               string                             `yaml:"log_level"`
 	WebUI                  *WebUIConfigFile                    `yaml:"web_ui"`
+	CostMode               string                             `yaml:"cost_mode"`
+	StaticCosts            map[string]map[string]map[string]float64 `yaml:"static_costs"`
+	APISocket              string                             `yaml:"api_socket"`
 }
 
 type WebUIConfigFile struct {
@@ -79,6 +83,10 @@ type ControllerConfig struct {
 	AllowedClients            []types.PerClientConfig
 	LogLevel                  string
 	WebUI                     *WebUIConfig
+	CostMode                  string // "probe" or "static"
+	StaticCosts               map[string]map[string]map[types.AFName]float64 // [src_name][dst_name][af]cost
+	APISocket                 string
+	ConfigPath                string // path to config file (for write-back)
 }
 
 type WebUIConfig struct {
@@ -141,6 +149,15 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 			ProbeTimeoutMs:    raw.Probing.ProbeTimeoutMs,
 		},
 	}
+
+	// CostMode
+	cfg.CostMode = raw.CostMode
+	if cfg.CostMode != "probe" && cfg.CostMode != "static" {
+		return nil, fmt.Errorf("invalid cost_mode %q (must be probe or static)", cfg.CostMode)
+	}
+
+	cfg.APISocket = raw.APISocket
+	cfg.ConfigPath = path
 
 	// Parse private key
 	keyBytes, err := base64.StdEncoding.DecodeString(raw.PrivateKey)
@@ -220,6 +237,31 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 		copy(pc.ClientID[:], pubBytes)
 
 		cfg.AllowedClients = append(cfg.AllowedClients, pc)
+	}
+
+	// Parse static costs (name-indexed -> name-indexed with AFName keys)
+	if len(raw.StaticCosts) > 0 {
+		// Build name set for validation
+		nameSet := make(map[string]bool)
+		for _, pc := range cfg.AllowedClients {
+			nameSet[pc.ClientName] = true
+		}
+		cfg.StaticCosts = make(map[string]map[string]map[types.AFName]float64)
+		for src, dsts := range raw.StaticCosts {
+			if !nameSet[src] {
+				return nil, fmt.Errorf("static_costs: unknown client name %q", src)
+			}
+			cfg.StaticCosts[src] = make(map[string]map[types.AFName]float64)
+			for dst, afs := range dsts {
+				if !nameSet[dst] {
+					return nil, fmt.Errorf("static_costs: unknown client name %q", dst)
+				}
+				cfg.StaticCosts[src][dst] = make(map[types.AFName]float64)
+				for af, cost := range afs {
+					cfg.StaticCosts[src][dst][types.AFName(af)] = cost
+				}
+			}
+		}
 	}
 
 	// Parse WebUI config
