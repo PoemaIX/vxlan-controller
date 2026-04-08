@@ -385,6 +385,45 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		results.Results[peer.clientID.Hex()] = entry
 	}
 
+	// Save local probe results for API
+	c.mu.Lock()
+	c.lastProbeTime = time.Now()
+	c.lastProbeResults = make(map[types.ClientID]*LocalProbeResult)
+	for _, peer := range peers {
+		lpr := &LocalProbeResult{AFResults: make(map[types.AFName]*LocalAFProbeResult)}
+		for af := range c.Config.AFSettings {
+			key := latKey{clientID: peer.clientID, af: af}
+			latMu.Lock()
+			lats := latencies[key]
+			sentCount := sent[key]
+			latMu.Unlock()
+			if sentCount == 0 {
+				continue
+			}
+			afr := &LocalAFProbeResult{}
+			if len(lats) == 0 {
+				afr.LatencyMean = types.INF_LATENCY
+				afr.PacketLoss = 1.0
+			} else {
+				var sum float64
+				for _, l := range lats {
+					sum += l
+				}
+				afr.LatencyMean = sum / float64(len(lats))
+				var variance float64
+				for _, l := range lats {
+					diff := l - afr.LatencyMean
+					variance += diff * diff
+				}
+				afr.LatencyStd = math.Sqrt(variance / float64(len(lats)))
+				afr.PacketLoss = 1.0 - float64(len(lats))/float64(sentCount)
+			}
+			lpr.AFResults[af] = afr
+		}
+		c.lastProbeResults[peer.clientID] = lpr
+	}
+	c.mu.Unlock()
+
 	// Send ProbeResults to ALL controllers via sendqueue
 	resultsData, err := proto.Marshal(results)
 	if err != nil {

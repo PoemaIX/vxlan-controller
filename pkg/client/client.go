@@ -66,6 +66,8 @@ type Client struct {
 	pendingHandshakesMu sync.Mutex
 	probeResultsMu     sync.Mutex
 	probeResponseChs   map[uint64]chan probeResponseData
+	lastProbeTime      time.Time
+	lastProbeResults   map[types.ClientID]*LocalProbeResult
 
 	// Channels
 	fdbNotifyCh       chan struct{}
@@ -121,6 +123,18 @@ type ControllerView struct {
 	Clients          map[types.ClientID]*ClientInfoView
 	RouteMatrix      map[types.ClientID]map[types.ClientID]*types.RouteEntry
 	RouteTable       []*types.RouteTableEntry
+}
+
+// LocalProbeResult stores the last probe result for a peer (client-side).
+type LocalProbeResult struct {
+	AFResults map[types.AFName]*LocalAFProbeResult
+}
+
+// LocalAFProbeResult stores per-AF probe result.
+type LocalAFProbeResult struct {
+	LatencyMean float64
+	LatencyStd  float64
+	PacketLoss  float64
 }
 
 // ClientInfoView is the Client's view of a ClientInfo from the Controller.
@@ -962,6 +976,8 @@ func (c *Client) handleAPI(method string, params json.RawMessage) (interface{}, 
 		return c.apiAFGet(params)
 	case "af.set":
 		return c.apiAFSet(params)
+	case "peer.list":
+		return c.apiPeerList()
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -1050,6 +1066,85 @@ func (c *Client) apiAFSet(params json.RawMessage) (interface{}, error) {
 	}
 
 	return map[string]string{"af": p.AF, "bind_addr": newAddr.String()}, nil
+}
+
+type peerListEntry struct {
+	ClientID   string                       `json:"client_id"`
+	ClientName string                       `json:"client_name"`
+	Endpoints  map[string]*peerEndpointInfo `json:"endpoints"`
+	LastSeen   string                       `json:"last_seen"`
+	Probe      *peerProbeInfo               `json:"probe,omitempty"`
+}
+
+type peerEndpointInfo struct {
+	IP        string `json:"ip"`
+	ProbePort uint16 `json:"probe_port"`
+}
+
+type peerProbeInfo struct {
+	Time      string                        `json:"time"`
+	AFResults map[string]*peerAFProbeResult `json:"af_results"`
+}
+
+type peerAFProbeResult struct {
+	LatencyMean float64 `json:"latency_mean"`
+	LatencyStd  float64 `json:"latency_std"`
+	PacketLoss  float64 `json:"packet_loss"`
+}
+
+func (c *Client) apiPeerList() ([]peerListEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Find authority controller view
+	var view *ControllerView
+	if c.AuthorityCtrl != nil {
+		if cc, ok := c.Controllers[*c.AuthorityCtrl]; ok && cc.State != nil {
+			view = cc.State
+		}
+	}
+	if view == nil {
+		return []peerListEntry{}, nil
+	}
+
+	var result []peerListEntry
+	for clientID, ci := range view.Clients {
+		if clientID == c.ClientID {
+			continue
+		}
+
+		entry := peerListEntry{
+			ClientID:   clientID.Hex()[:16],
+			ClientName: ci.ClientName,
+			Endpoints:  make(map[string]*peerEndpointInfo),
+			LastSeen:   ci.LastSeen.Format(time.RFC3339),
+		}
+
+		for af, ep := range ci.Endpoints {
+			entry.Endpoints[string(af)] = &peerEndpointInfo{
+				IP:        ep.IP.String(),
+				ProbePort: ep.ProbePort,
+			}
+		}
+
+		if pr, ok := c.lastProbeResults[clientID]; ok {
+			entry.Probe = &peerProbeInfo{
+				Time:      c.lastProbeTime.Format(time.RFC3339),
+				AFResults: make(map[string]*peerAFProbeResult),
+			}
+			for af, afr := range pr.AFResults {
+				entry.Probe.AFResults[string(af)] = &peerAFProbeResult{
+					LatencyMean: afr.LatencyMean,
+					LatencyStd:  afr.LatencyStd,
+					PacketLoss:  afr.PacketLoss,
+				}
+			}
+		}
+
+		result = append(result, entry)
+	}
+
+	return result, nil
 }
 
 func (c *Client) updateBindAddr(af types.AFName, newAddr netip.Addr) error {

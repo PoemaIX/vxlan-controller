@@ -44,6 +44,18 @@ func runVxccli(sockPath string, args []string) {
 			vxccliUsage()
 			os.Exit(1)
 		}
+	case "peer":
+		if len(args) < 2 {
+			vxccliUsage()
+			os.Exit(1)
+		}
+		switch args[1] {
+		case "list":
+			vxccliPeerList(sockPath)
+		default:
+			vxccliUsage()
+			os.Exit(1)
+		}
 	default:
 		vxccliUsage()
 		os.Exit(1)
@@ -57,6 +69,7 @@ func vxccliUsage() {
 	fmt.Fprintln(os.Stderr, "  af list             List address families and bind addresses")
 	fmt.Fprintln(os.Stderr, "  af get <af>         Get bind address for an AF")
 	fmt.Fprintln(os.Stderr, "  af set <af> <addr>  Set bind address (non-autoip only)")
+	fmt.Fprintln(os.Stderr, "  peer list           List peers with endpoints and probe results")
 }
 
 type afInfoResult struct {
@@ -125,4 +138,72 @@ func vxccliAFSet(sockPath string, afName, addr string) {
 		os.Exit(1)
 	}
 	fmt.Printf("%s: %s\n", result["af"], result["bind_addr"])
+}
+
+type peerListResult struct {
+	ClientID   string                          `json:"client_id"`
+	ClientName string                          `json:"client_name"`
+	Endpoints  map[string]*peerEndpointResult  `json:"endpoints"`
+	LastSeen   string                          `json:"last_seen"`
+	Probe      *peerProbeResult                `json:"probe,omitempty"`
+}
+
+type peerEndpointResult struct {
+	IP        string `json:"ip"`
+	ProbePort uint16 `json:"probe_port"`
+}
+
+type peerProbeResult struct {
+	Time      string                            `json:"time"`
+	AFResults map[string]*peerAFProbeResultCLI  `json:"af_results"`
+}
+
+type peerAFProbeResultCLI struct {
+	LatencyMean float64 `json:"latency_mean"`
+	LatencyStd  float64 `json:"latency_std"`
+	PacketLoss  float64 `json:"packet_loss"`
+}
+
+func vxccliPeerList(sockPath string) {
+	raw, err := apisock.Call(sockPath, "peer.list", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var result []peerListResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result) == 0 {
+		fmt.Println("(no peers)")
+		return
+	}
+
+	for _, peer := range result {
+		name := peer.ClientName
+		if name == "" {
+			name = peer.ClientID
+		}
+		fmt.Printf("%s (%s)  last_seen=%s\n", name, peer.ClientID, peer.LastSeen)
+
+		for af, ep := range peer.Endpoints {
+			fmt.Printf("  %s: %s:%d\n", af, ep.IP, ep.ProbePort)
+		}
+
+		if peer.Probe != nil {
+			fmt.Printf("  probe_time=%s\n", peer.Probe.Time)
+			for af, pr := range peer.Probe.AFResults {
+				lossStr := fmt.Sprintf("%.2f", pr.PacketLoss)
+				if pr.PacketLoss >= 1.0 {
+					lossStr = "1.00 (unreachable)"
+				}
+				fmt.Printf("    %s: mean=%.2fms std=%.2fms loss=%s\n", af, pr.LatencyMean, pr.LatencyStd, lossStr)
+			}
+		} else {
+			fmt.Printf("  (no probe data)\n")
+		}
+	}
 }
