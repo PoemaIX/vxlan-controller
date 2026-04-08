@@ -206,11 +206,12 @@ func vxccliPeerList(sockPath string) {
 			fmt.Printf("  probe_time=%s\n", peer.Probe.Time)
 			for _, af := range sortedKeys(peer.Probe.AFResults) {
 				pr := peer.Probe.AFResults[af]
-				lossStr := fmt.Sprintf("%.2f", pr.PacketLoss)
 				if pr.PacketLoss >= 1.0 {
-					lossStr = "1.00 (unreachable)"
+					fmt.Printf("    %s: unreachable\n", af)
+				} else {
+					lossStr := fmt.Sprintf("%.0f%%", pr.PacketLoss*100)
+					fmt.Printf("    %s: mean=%.2fms std=%.2fms loss=%s\n", af, pr.LatencyMean, pr.LatencyStd, lossStr)
 				}
-				fmt.Printf("    %s: mean=%.2fms std=%.2fms loss=%s\n", af, pr.LatencyMean, pr.LatencyStd, lossStr)
 			}
 		} else {
 			fmt.Printf("  (no probe data)\n")
