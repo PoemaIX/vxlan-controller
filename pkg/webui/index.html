@@ -477,7 +477,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       </div>
       <div style="padding:0 14px 10px;">
         <table id="site-detail-table">
-          <thead><tr><th>MAC</th><th>IP</th><th>Mcast</th></tr></thead>
+          <thead><tr><th>MAC</th><th>Mcast</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -493,7 +493,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       </div>
       <div class="scroll-area">
         <table id="route-table">
-          <thead><tr><th>MAC</th><th>IP</th><th>Site</th><th>Mcast</th></tr></thead>
+          <thead><tr><th>MAC</th><th>Site</th><th>Mcast</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -847,10 +847,10 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     (client.routes||[]).forEach((r, i) => {
       const stats = getMcastStats(r.mac, client.name);
       const rk = 'sd-' + name + '-' + i;
-      html += '<tr><td>' + displayMAC(r.mac) + '</td><td>' + (r.ip||'-') + '</td>';
+      html += '<tr><td>' + displayMAC(r.mac) + '</td>';
       html += '<td>' + mcastHTML(stats, rk) + '</td></tr>';
     });
-    if (!html) html = '<tr><td colspan="3" class="empty-state">no routes</td></tr>';
+    if (!html) html = '<tr><td colspan="2" class="empty-state">no routes</td></tr>';
     tbody.innerHTML = html;
   }
 
@@ -868,14 +868,13 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     (state.route_table||[]).forEach((r, i) => {
       const owners = Object.keys(r.owners||{}).map(id => nodeLabel(nodeName(id))).join(', ');
       const a = alias(r.mac);
-      const ipStr = r.ip || '-';
-      if (flt && !(a+' '+r.mac+' '+ipStr+' '+owners).toLowerCase().includes(flt)) return;
+      if (flt && !(a+' '+r.mac+' '+owners).toLowerCase().includes(flt)) return;
       const stats = getMcastStats(r.mac);
       const rk = 'rt-' + i;
-      html += '<tr><td>' + displayMAC(r.mac) + '</td><td>' + ipStr + '</td><td>' + owners + '</td>';
+      html += '<tr><td>' + displayMAC(r.mac) + '</td><td>' + owners + '</td>';
       html += '<td>' + mcastHTML(stats, rk) + '</td></tr>';
     });
-    if (!html) html = '<tr><td colspan="4" class="empty-state">no routes</td></tr>';
+    if (!html) html = '<tr><td colspan="3" class="empty-state">no routes</td></tr>';
     tbody.innerHTML = html;
   }
 

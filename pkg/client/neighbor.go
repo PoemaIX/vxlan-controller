@@ -64,37 +64,18 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 	// Build route from event
 	var rt *pb.Type2Route
 
-	// Check if this is a bridge FDB entry (AF_BRIDGE) or a neighbor entry (AF_INET/AF_INET6)
-	if n.Family == unix.AF_BRIDGE {
-		// FDB entry — check if local
-		if !c.isLocalFDBEntry(n) {
-			return
-		}
-		rt = &pb.Type2Route{
-			Mac:      n.HardwareAddr,
-			IsDelete: isDelete,
-		}
-	} else {
-		// ARP/NDP neighbor entry — check if on our bridge
-		bridge, err := netlink.LinkByName(c.Config.BridgeName)
-		if err != nil {
-			return
-		}
-		if n.LinkIndex != bridge.Attrs().Index {
-			return
-		}
-		if len(n.HardwareAddr) == 0 {
-			return
-		}
-		ip, ok := netip.AddrFromSlice(n.IP)
-		if !ok {
-			return
-		}
-		rt = &pb.Type2Route{
-			Mac:      n.HardwareAddr,
-			Ip:       addrToBytes(ip),
-			IsDelete: isDelete,
-		}
+	// Only process bridge FDB entries; skip ARP/NDP neighbor entries
+	// (neighbor table contains both local and remote IP-MAC pairs,
+	// making it unreliable for determining IP ownership)
+	if n.Family != unix.AF_BRIDGE {
+		return
+	}
+	if !c.isLocalFDBEntry(n) {
+		return
+	}
+	rt = &pb.Type2Route{
+		Mac:      n.HardwareAddr,
+		IsDelete: isDelete,
 	}
 
 	// Filter outbound route
@@ -204,29 +185,11 @@ func (c *Client) dumpLocalState() {
 		routes = append(routes, rt)
 	}
 
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		neighEntries, err := netlink.NeighList(bridgeIndex, family)
-		if err != nil {
-			continue
-		}
-		for _, n := range neighEntries {
-			if len(n.HardwareAddr) == 0 {
-				continue
-			}
-			if n.State&(netlink.NUD_REACHABLE|netlink.NUD_STALE|netlink.NUD_PERMANENT) == 0 {
-				continue
-			}
-			ip, ok := netip.AddrFromSlice(n.IP)
-			if !ok {
-				continue
-			}
-			rt := types.Type2Route{
-				MAC: n.HardwareAddr,
-				IP:  ip,
-			}
-			routes = append(routes, rt)
-		}
-	}
+	// NOTE: ARP/NDP neighbor table IP learning is disabled.
+	// The bridge neighbor table contains both local and remote IP-MAC pairs,
+	// making it unreliable for determining IP ownership. Leaf IPs behind the
+	// bridge also don't appear in the neighbor table. Kept as a placeholder
+	// for future reimplementation.
 
 	// Filter outbound routes
 	total := len(routes)
