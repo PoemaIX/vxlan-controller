@@ -15,7 +15,10 @@ var DefaultNTPServers = []string{
 	"time.google.com",
 	"time.apple.com",
 	"pool.ntp.org",
-	"time.windows.com",
+	"0.pool.ntp.org",
+	"1.pool.ntp.org",
+	"2.pool.ntp.org",
+	"3.pool.ntp.org",
 	"ntp.ubuntu.com",
 }
 
@@ -69,10 +72,10 @@ var DefaultClientConfig = ClientConfigFile{
 var DefaultControllerConfig = ControllerConfigFile{
 	PrivateKey:                "<base64 private key from: wg genkey>",
 	ClientOfflineTimeout:      30,
-	SyncNewClientDebounce:     2,
+	SyncNewClientDebounce:     3,
 	SyncNewClientDebounceMax:  10,
-	TopologyUpdateDebounce:    1,
-	TopologyUpdateDebounceMax: 5,
+	TopologyUpdateDebounce:    3,
+	TopologyUpdateDebounceMax: 7,
 	Probing: ProbingConfigFile{
 		ProbeIntervalS:    5,
 		ProbeTimes:        5,

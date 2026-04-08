@@ -10,10 +10,10 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
 
 - **Dual-stack**: IPv4 and IPv6 underlay, with cross-AF transit routing
 - **Multi-AF design**: Beyond v4/v6, supports arbitrary address families (e.g. `asia_v4`, `europe_v4`) for regional topologies
-- **WireGuard-style encryption**: Noise IK handshake (X25519 + ChaCha20-Poly1305) on all control and data plane traffic
+- **WireGuard-style encryption**: Noise IK handshake (X25519 + ChaCha20-Poly1305) on all control plane traffic. data plane uses plain vxlan.
 - **Controller failover**: Clients connect to multiple controllers, automatically switch on failure
 - **Broadcast relay**: Controller relays ARP/ND across all AF listeners, no multicast FDB needed
-- **Dynamic IP**: Runtime bind address changes via Unix socket API or automatic interface monitoring (`autoip_interface`)
+- **Dynamic IP**: Runtime bind address changes via automatic interface monitoring (`autoip_interface`)
 - **Lua filtering**: User-defined Lua scripts for multicast/route filtering with per-MAC/per-client rate limiting
 - **VXLAN firewall**: nftables-based injection protection, whitelisting only known peer endpoint IPs
 - **WebUI**: Real-time web dashboard with client status, routing tables, latency matrix, and multicast stats
@@ -155,18 +155,6 @@ allowed_clients:
     # filters:                       # optional per-client Lua filters
     #   input_mcast: |
     #     function filter(pkt) return true end
-```
-
-## Runtime API
-
-Each client exposes a Unix socket at `/tmp/vxlan-client-<id>.sock`:
-
-```bash
-# Query current bind address
-echo "GET_BIND_ADDR v4" | socat - UNIX-CONNECT:/tmp/vxlan-client-abcd1234.sock
-
-# Update bind address (e.g. after IP change)
-echo "UPDATE_BIND_ADDR v4 192.168.1.200" | socat - UNIX-CONNECT:/tmp/vxlan-client-abcd1234.sock
 ```
 
 ## Tests
