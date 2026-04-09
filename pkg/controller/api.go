@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -35,6 +36,10 @@ func (c *Controller) handleAPI(method string, params json.RawMessage) (interface
 		return c.apiCostSetMode(params)
 	case "cost.store":
 		return c.apiCostStore()
+	case "show.client":
+		return c.apiShowClient()
+	case "show.route":
+		return c.apiShowRoute(params)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -215,4 +220,111 @@ func (c *Controller) apiCostStore() (interface{}, error) {
 
 	vlog.Infof("[Controller] cost store: saved %d cost entries to %s", count, filepath.Base(configPath))
 	return map[string]int{"entries": count}, nil
+}
+
+// ShowClientEntry is a single client entry for show.client.
+type ShowClientEntry struct {
+	ClientID   string                       `json:"client_id"`
+	ClientName string                       `json:"client_name"`
+	Online     bool                         `json:"online"`
+	LastSeen   string                       `json:"last_seen"`
+	Endpoints  map[string]*ShowEndpointInfo `json:"endpoints"`
+	ActiveAF   string                       `json:"active_af"`
+	Synced     bool                         `json:"synced"`
+	RouteCount int                          `json:"route_count"`
+}
+
+type ShowEndpointInfo struct {
+	IP string `json:"ip"`
+}
+
+func (c *Controller) apiShowClient() ([]ShowClientEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	var result []ShowClientEntry
+	for id, ci := range c.State.Clients {
+		entry := ShowClientEntry{
+			ClientID:   id.Hex()[:16],
+			ClientName: ci.ClientName,
+			Online:     now.Sub(ci.LastSeen) < c.Config.ClientOfflineTimeout,
+			LastSeen:   ci.LastSeen.Format(time.RFC3339),
+			Endpoints:  make(map[string]*ShowEndpointInfo),
+			RouteCount: len(ci.Routes),
+		}
+		for af, ep := range ci.Endpoints {
+			entry.Endpoints[string(af)] = &ShowEndpointInfo{IP: ep.IP.String()}
+		}
+		if cc, ok := c.clients[id]; ok {
+			entry.ActiveAF = string(cc.ActiveAF)
+			entry.Synced = cc.Synced
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+// ShowRouteEntry is a single route table entry for show.route.
+type ShowRouteEntry struct {
+	MAC    string            `json:"mac"`
+	IP     string            `json:"ip,omitempty"`
+	Owners []ShowRouteOwner  `json:"owners"`
+}
+
+type ShowRouteOwner struct {
+	ClientID   string `json:"client_id"`
+	ClientName string `json:"client_name"`
+}
+
+type showRouteParams struct {
+	Client string `json:"client,omitempty"`
+}
+
+func (c *Controller) apiShowRoute(params json.RawMessage) ([]ShowRouteEntry, error) {
+	var p showRouteParams
+	if params != nil {
+		_ = json.Unmarshal(params, &p)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// If filtering by client name, find the client ID
+	var filterClientID *types.ClientID
+	if p.Client != "" {
+		for id, ci := range c.State.Clients {
+			if ci.ClientName == p.Client {
+				cid := id
+				filterClientID = &cid
+				break
+			}
+		}
+		if filterClientID == nil {
+			return nil, fmt.Errorf("client %q not found", p.Client)
+		}
+	}
+
+	var result []ShowRouteEntry
+	for _, entry := range c.State.RouteTable {
+		if filterClientID != nil {
+			if _, ok := entry.Owners[*filterClientID]; !ok {
+				continue
+			}
+		}
+		re := ShowRouteEntry{
+			MAC: entry.MAC.String(),
+		}
+		if entry.IP.IsValid() {
+			re.IP = entry.IP.String()
+		}
+		for cid := range entry.Owners {
+			re.Owners = append(re.Owners, ShowRouteOwner{
+				ClientID:   cid.Hex()[:16],
+				ClientName: c.clientNameByID(cid),
+			})
+		}
+		result = append(result, re)
+	}
+	return result, nil
 }

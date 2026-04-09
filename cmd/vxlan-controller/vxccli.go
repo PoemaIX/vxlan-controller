@@ -59,6 +59,24 @@ func runVxccli(sockPath string, args []string) {
 			vxccliUsage()
 			os.Exit(1)
 		}
+	case "show":
+		if len(args) < 2 {
+			vxccliUsage()
+			os.Exit(1)
+		}
+		switch args[1] {
+		case "controller":
+			vxccliShowController(sockPath)
+		case "route":
+			if len(args) >= 4 && args[2] == "controller" {
+				vxccliShowRoute(sockPath, args[3])
+			} else {
+				vxccliShowRoute(sockPath, "")
+			}
+		default:
+			vxccliUsage()
+			os.Exit(1)
+		}
 	default:
 		vxccliUsage()
 		os.Exit(1)
@@ -69,10 +87,13 @@ func vxccliUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode vxccli [--sock <path>] <command>")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Commands:")
-	fmt.Fprintln(os.Stderr, "  af list             List address families and bind addresses")
-	fmt.Fprintln(os.Stderr, "  af get <af>         Get bind address for an AF")
-	fmt.Fprintln(os.Stderr, "  af set <af> <addr>  Set bind address (non-autoip only)")
-	fmt.Fprintln(os.Stderr, "  peer list           List peers with endpoints and probe results")
+	fmt.Fprintln(os.Stderr, "  show controller                    Show controller connection states")
+	fmt.Fprintln(os.Stderr, "  show route                         Show route table (from authority)")
+	fmt.Fprintln(os.Stderr, "  show route controller <id>         Show route table from a specific controller")
+	fmt.Fprintln(os.Stderr, "  af list                            List address families and bind addresses")
+	fmt.Fprintln(os.Stderr, "  af get <af>                        Get bind address for an AF")
+	fmt.Fprintln(os.Stderr, "  af set <af> <addr>                 Set bind address (non-autoip only)")
+	fmt.Fprintln(os.Stderr, "  peer list                          List peers with endpoints and probe results")
 }
 
 type afInfoResult struct {
@@ -220,3 +241,126 @@ func vxccliPeerList(sockPath string) {
 		}
 	}
 }
+
+type showControllerEntry struct {
+	ControllerID string                          `json:"controller_id"`
+	State        string                          `json:"state"`
+	IsAuthority  bool                            `json:"is_authority"`
+	ActiveAF     string                          `json:"active_af"`
+	Synced       bool                            `json:"synced"`
+	MACsSynced   bool                            `json:"macs_synced"`
+	ClientCount  int                             `json:"client_count"`
+	Endpoints    map[string]*showCtrlEndpointCLI `json:"endpoints"`
+}
+
+type showCtrlEndpointCLI struct {
+	Addr      string `json:"addr"`
+	Connected bool   `json:"connected"`
+}
+
+func vxccliShowController(sockPath string) {
+	raw, err := apisock.Call(sockPath, "show.controller", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var result []showControllerEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result) == 0 {
+		fmt.Println("(no controllers)")
+		return
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ControllerID < result[j].ControllerID
+	})
+
+	for _, c := range result {
+		authStr := ""
+		if c.IsAuthority {
+			authStr = " *"
+		}
+		syncStr := ""
+		if !c.Synced {
+			syncStr = " (not synced)"
+		}
+		macStr := ""
+		if !c.MACsSynced {
+			macStr = " (MACs not synced)"
+		}
+		fmt.Printf("%-16s  %-12s af=%s clients=%d%s%s%s\n",
+			c.ControllerID, c.State, c.ActiveAF, c.ClientCount, authStr, syncStr, macStr)
+		for _, af := range sortedKeys(c.Endpoints) {
+			ep := c.Endpoints[af]
+			connStr := "down"
+			if ep.Connected {
+				connStr = "up"
+			}
+			fmt.Printf("  %s: %s (%s)\n", af, ep.Addr, connStr)
+		}
+	}
+}
+
+type showRouteCLIEntry struct {
+	MAC        string              `json:"mac"`
+	IP         string              `json:"ip,omitempty"`
+	Owners     []showRouteOwnerCLI `json:"owners"`
+	Controller string              `json:"controller,omitempty"`
+}
+
+type showRouteOwnerCLI struct {
+	ClientID   string `json:"client_id"`
+	ClientName string `json:"client_name"`
+}
+
+func vxccliShowRoute(sockPath string, ctrlID string) {
+	var params interface{}
+	if ctrlID != "" {
+		params = map[string]string{"controller": ctrlID}
+	}
+
+	raw, err := apisock.Call(sockPath, "show.route", params)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var result []showRouteCLIEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result) == 0 {
+		fmt.Println("(no routes)")
+		return
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].MAC < result[j].MAC
+	})
+
+	for _, r := range result {
+		ownerNames := make([]string, 0, len(r.Owners))
+		for _, o := range r.Owners {
+			if o.ClientName != "" {
+				ownerNames = append(ownerNames, o.ClientName)
+			} else {
+				ownerNames = append(ownerNames, o.ClientID)
+			}
+		}
+		sort.Strings(ownerNames)
+
+		ipStr := ""
+		if r.IP != "" {
+			ipStr = " " + r.IP
+		}
+		fmt.Printf("%-20s%s  via %s\n", r.MAC, ipStr, joinStrings(ownerNames, ", "))
+	}
+}
+

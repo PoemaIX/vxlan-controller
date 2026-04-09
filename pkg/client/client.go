@@ -978,6 +978,10 @@ func (c *Client) handleAPI(method string, params json.RawMessage) (interface{}, 
 		return c.apiAFSet(params)
 	case "peer.list":
 		return c.apiPeerList()
+	case "show.controller":
+		return c.apiShowController()
+	case "show.route":
+		return c.apiShowRoute(params)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -1144,6 +1148,160 @@ func (c *Client) apiPeerList() ([]peerListEntry, error) {
 		result = append(result, entry)
 	}
 
+	return result, nil
+}
+
+// ShowControllerEntry is a single controller for show.controller.
+type ShowControllerEntry struct {
+	ControllerID string                       `json:"controller_id"`
+	State        string                       `json:"state"`
+	IsAuthority  bool                         `json:"is_authority"`
+	ActiveAF     string                       `json:"active_af"`
+	Synced       bool                         `json:"synced"`
+	MACsSynced   bool                         `json:"macs_synced"`
+	ClientCount  int                          `json:"client_count"`
+	Endpoints    map[string]*showCtrlEndpoint `json:"endpoints"`
+}
+
+type showCtrlEndpoint struct {
+	Addr      string `json:"addr"`
+	Connected bool   `json:"connected"`
+}
+
+func (c *Client) apiShowController() ([]ShowControllerEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var result []ShowControllerEntry
+	for ctrlID, cc := range c.Controllers {
+		entry := ShowControllerEntry{
+			ControllerID: ctrlID.Hex()[:16],
+			ActiveAF:     string(cc.ActiveAF),
+			Synced:       cc.Synced,
+			MACsSynced:   cc.MACsSynced,
+			Endpoints:    make(map[string]*showCtrlEndpoint),
+		}
+
+		if c.AuthorityCtrl != nil && *c.AuthorityCtrl == ctrlID {
+			entry.IsAuthority = true
+		}
+
+		// Determine connection state
+		hasConnected := false
+		for af, afc := range cc.AFConns {
+			ep := &showCtrlEndpoint{
+				Connected: afc.Connected,
+			}
+			// Find addr from config
+			for _, afCfg := range c.Config.AFSettings {
+				for _, ctrl := range afCfg.Controllers {
+					if ctrl.PubKey == ctrlID {
+						ep.Addr = ctrl.Addr.String()
+					}
+				}
+			}
+			entry.Endpoints[string(af)] = ep
+			if afc.Connected {
+				hasConnected = true
+			}
+		}
+
+		if hasConnected {
+			entry.State = "established"
+		} else if len(cc.AFConns) > 0 {
+			entry.State = "connecting"
+		} else {
+			entry.State = "down"
+		}
+
+		if cc.State != nil {
+			entry.ClientCount = cc.State.ClientCount
+		}
+
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+// ShowRouteEntry is a single route for show.route (client side).
+type ShowRouteEntry struct {
+	MAC        string           `json:"mac"`
+	IP         string           `json:"ip,omitempty"`
+	Owners     []showRouteOwner `json:"owners"`
+	Controller string           `json:"controller,omitempty"`
+}
+
+type showRouteOwner struct {
+	ClientID   string `json:"client_id"`
+	ClientName string `json:"client_name"`
+}
+
+type showRouteParams struct {
+	Controller string `json:"controller,omitempty"`
+}
+
+func (c *Client) apiShowRoute(params json.RawMessage) ([]ShowRouteEntry, error) {
+	var p showRouteParams
+	if params != nil {
+		_ = json.Unmarshal(params, &p)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Select which controller view(s) to use
+	type ctrlView struct {
+		ctrlID types.ControllerID
+		view   *ControllerView
+	}
+	var views []ctrlView
+
+	if p.Controller != "" {
+		// Find controller by ID prefix
+		for ctrlID, cc := range c.Controllers {
+			if cc.State != nil && ctrlID.Hex()[:len(p.Controller)] == p.Controller {
+				views = append(views, ctrlView{ctrlID, cc.State})
+				break
+			}
+		}
+		if len(views) == 0 {
+			return nil, fmt.Errorf("controller %q not found", p.Controller)
+		}
+	} else {
+		// Use authority controller
+		if c.AuthorityCtrl != nil {
+			if cc, ok := c.Controllers[*c.AuthorityCtrl]; ok && cc.State != nil {
+				views = append(views, ctrlView{*c.AuthorityCtrl, cc.State})
+			}
+		}
+		if len(views) == 0 {
+			return []ShowRouteEntry{}, nil
+		}
+	}
+
+	var result []ShowRouteEntry
+	for _, cv := range views {
+		for _, entry := range cv.view.RouteTable {
+			re := ShowRouteEntry{
+				MAC:        entry.MAC.String(),
+				Controller: cv.ctrlID.Hex()[:16],
+			}
+			if entry.IP.IsValid() {
+				re.IP = entry.IP.String()
+			}
+			for cid := range entry.Owners {
+				name := ""
+				if ci, ok := cv.view.Clients[cid]; ok {
+					name = ci.ClientName
+				}
+				re.Owners = append(re.Owners, showRouteOwner{
+					ClientID:   cid.Hex()[:16],
+					ClientName: name,
+				})
+			}
+			result = append(result, re)
+		}
+	}
 	return result, nil
 }
 

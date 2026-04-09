@@ -43,6 +43,24 @@ func runVxscli(sockPath string, args []string) {
 			vxscliUsage()
 			os.Exit(1)
 		}
+	case "show":
+		if len(args) < 2 {
+			vxscliUsage()
+			os.Exit(1)
+		}
+		switch args[1] {
+		case "client":
+			vxscliShowClient(sockPath)
+		case "route":
+			if len(args) >= 4 && args[2] == "client" {
+				vxscliShowRoute(sockPath, args[3])
+			} else {
+				vxscliShowRoute(sockPath, "")
+			}
+		default:
+			vxscliUsage()
+			os.Exit(1)
+		}
 	default:
 		vxscliUsage()
 		os.Exit(1)
@@ -53,10 +71,13 @@ func vxscliUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: vxlan-controller --mode vxscli [--sock <path>] <command>")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Commands:")
-	fmt.Fprintln(os.Stderr, "  cost get                    Show cost matrix")
-	fmt.Fprintln(os.Stderr, "  cost getmode                Show current cost mode")
-	fmt.Fprintln(os.Stderr, "  cost setmode <probe|static> Set cost mode")
-	fmt.Fprintln(os.Stderr, "  cost store                  Save current costs to config")
+	fmt.Fprintln(os.Stderr, "  show client                      Show connected clients")
+	fmt.Fprintln(os.Stderr, "  show route                       Show route table")
+	fmt.Fprintln(os.Stderr, "  show route client <name>         Show routes for a specific client")
+	fmt.Fprintln(os.Stderr, "  cost get                         Show cost matrix")
+	fmt.Fprintln(os.Stderr, "  cost getmode                     Show current cost mode")
+	fmt.Fprintln(os.Stderr, "  cost setmode <probe|static>      Set cost mode")
+	fmt.Fprintln(os.Stderr, "  cost store                       Save current costs to config")
 }
 
 type afCostInfo struct {
@@ -158,6 +179,137 @@ func vxscliCostStore(sockPath string) {
 		os.Exit(1)
 	}
 	fmt.Printf("stored %d cost entries to config\n", result["entries"])
+}
+
+type showClientEntry struct {
+	ClientID   string                          `json:"client_id"`
+	ClientName string                          `json:"client_name"`
+	Online     bool                            `json:"online"`
+	LastSeen   string                          `json:"last_seen"`
+	Endpoints  map[string]*showEndpointInfo    `json:"endpoints"`
+	ActiveAF   string                          `json:"active_af"`
+	Synced     bool                            `json:"synced"`
+	RouteCount int                             `json:"route_count"`
+}
+
+type showEndpointInfo struct {
+	IP string `json:"ip"`
+}
+
+func vxscliShowClient(sockPath string) {
+	raw, err := apisock.Call(sockPath, "show.client", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var result []showClientEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result) == 0 {
+		fmt.Println("(no clients)")
+		return
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ClientName != result[j].ClientName {
+			return result[i].ClientName < result[j].ClientName
+		}
+		return result[i].ClientID < result[j].ClientID
+	})
+
+	for _, c := range result {
+		name := c.ClientName
+		if name == "" {
+			name = c.ClientID
+		}
+		state := "up"
+		if !c.Online {
+			state = "down"
+		}
+		syncStr := ""
+		if !c.Synced {
+			syncStr = " (not synced)"
+		}
+		fmt.Printf("%-20s %-6s id=%s af=%s routes=%d%s\n",
+			name, state, c.ClientID, c.ActiveAF, c.RouteCount, syncStr)
+		for _, af := range sortedKeys(c.Endpoints) {
+			ep := c.Endpoints[af]
+			fmt.Printf("  %s: %s\n", af, ep.IP)
+		}
+		fmt.Printf("  last_seen=%s\n", c.LastSeen)
+	}
+}
+
+type showRouteEntry struct {
+	MAC    string           `json:"mac"`
+	IP     string           `json:"ip,omitempty"`
+	Owners []showRouteOwner `json:"owners"`
+}
+
+type showRouteOwner struct {
+	ClientID   string `json:"client_id"`
+	ClientName string `json:"client_name"`
+}
+
+func vxscliShowRoute(sockPath string, clientName string) {
+	var params interface{}
+	if clientName != "" {
+		params = map[string]string{"client": clientName}
+	}
+
+	raw, err := apisock.Call(sockPath, "show.route", params)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	var result []showRouteEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(result) == 0 {
+		fmt.Println("(no routes)")
+		return
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].MAC < result[j].MAC
+	})
+
+	for _, r := range result {
+		ownerNames := make([]string, 0, len(r.Owners))
+		for _, o := range r.Owners {
+			if o.ClientName != "" {
+				ownerNames = append(ownerNames, o.ClientName)
+			} else {
+				ownerNames = append(ownerNames, o.ClientID)
+			}
+		}
+		sort.Strings(ownerNames)
+
+		ipStr := ""
+		if r.IP != "" {
+			ipStr = " " + r.IP
+		}
+		fmt.Printf("%-20s%s  via %s\n", r.MAC, ipStr, joinStrings(ownerNames, ", "))
+	}
+}
+
+func joinStrings(strs []string, sep string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	result := strs[0]
+	for _, s := range strs[1:] {
+		result += sep + s
+	}
+	return result
 }
 
 func sortedKeys[V any](m map[string]V) []string {
