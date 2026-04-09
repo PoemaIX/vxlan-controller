@@ -496,8 +496,9 @@ type Client struct {
     VxlanDevs     map[AFName]*VxlanDev  // 每個 AF 的 vxlan device
     TapFD         *os.File              // tap-inject 的 fd
 
-    // === 本地狀態 ===
-    LocalMACs     []Type2Route          // 本地鄰居表
+    // === 本地狀態（macMu RWMutex 保護，獨立於 c.mu）===
+    macMu         sync.RWMutex          // Write: netlink event, Read: sendloop full push
+    LocalMACs     []Type2Route          // 本地 FDB MAC 表
 
     // === FDB 狀態 ===
     CurrentFDB    map[fdbKey]fdbEntry   // 目前已寫入 kernel 的 FDB
@@ -573,7 +574,8 @@ main goroutine
  │
  ├─ [per-AF] probeListenLoop(af)               // 監聯 probe channel UDP，回覆 ProbeResponse
  │
- ├─ neighborWatchLoop()                        // netlink 監聽鄰居表變更
+ ├─ neighborInit()                             // 同步：subscribe + initLocalMACs（在 TCP 連線前完成）
+ ├─ neighborEventLoop()                       // goroutine：處理 netlink 事件
  │
  ├─ tapReadLoop()                              // 從 tap-inject fd 讀取 broadcast 封包 → 過濾 → 上傳 Controller
  │
@@ -598,7 +600,7 @@ main goroutine
 | `tcpConnLoop` | C*A (每個 Controller 的每個 AF) | 建立 TCP → Noise IK handshake → 發送 ClientRegister → 啟動 `tcpRecvLoop`。斷線後指數退避重連（1s→2s→...→30s），連線存活超過 10s 時重設退避 |
 | `tcpRecvLoop` | C*A | 讀取 TCP 訊息（ControllerState / ControllerStateUpdate），更新 `ControllerView`。收到全量更新時切換 `ActiveAF` |
 | `probeListenLoop` | A (每個 AF) | 監聽 probe UDP port，收到 ProbeRequest 解析 payload 取出 probe_id + src_timestamp，回覆 ProbeResponse{probe_id, dst_timestamp, src_timestamp}。收到 ProbeResponse 按 probe_id 路由到對應批次收集器 |
-| `neighborWatchLoop` | 1 | 透過 netlink 訂閱 `RTM_NEWNEIGH` / `RTM_DELNEIGH`，每個事件即時發送增量更新給所有 Controller（無 debounce）。上報前套用 output_route Lua filter |
+| `neighborInit` + `neighborEventLoop` | 1 | `neighborInit`（同步）：subscribe netlink + `initLocalMACs`（讀 FDB 寫入 LocalMACs），在 TCP 連線前完成。`neighborEventLoop`（goroutine）：處理 `RTM_NEWNEIGH` / `RTM_DELNEIGH`，macMu.WLock → 更新 LocalMACs → 推 incremental 到所有 sendqueue → macMu.WUnlock。上報前套用 output_route Lua filter |
 | `tapReadLoop` | 1 | 從 `TapFD` 讀取 broadcast 封包 → output_mcast Lua filter → rate limit → 統計 → 透過 active AF 的 UDP 上傳 Controller (MulticastForward) |
 | `tapWriteLoop` | 1 | 從 channel 取出 Controller relay 來的 broadcast 封包 → input_mcast Lua filter → 統計 → 寫入 `TapFD` 注入 bridge |
 | `fdbReconcileLoop` | 1 | 監聽 `RouteMatrix` 或 `RouteTable` 變更通知 (channel) → 重新計算 FDB → diff 寫入 kernel (`netlink`)。FDB 使用 master+self split：master entry (NUD_NOARP) 告訴 bridge 轉發到 vxlan port，self entry (NUD_PERMANENT) 告訴 vxlan device 封裝目標 IP |
@@ -623,14 +625,16 @@ main goroutine
    d. 若 clamp_mss_to_mtu: 寫入 nftables 規則（table 名稱由 clamp_mss_table 配置）
    e. 開啟 tap-inject fd (IFF_TAP | IFF_NO_PI)
    f. 若 vxlan_firewall: 建立 nftables 防火牆規則（table 名稱由 vxlan_firewall_table 配置）
-5. 啟動所有 per-controller, per-AF tcpConnLoop
-6. 啟動 probeListenLoop (per-AF)
-7. 啟動 neighborWatchLoop
-8. 啟動 tapReadLoop, tapWriteLoop
-9. 啟動 fdbReconcileLoop
-10. 啟動 mcastStatsLoop（multicast 統計上報）
-11. 若有 autoip_interface: 啟動 addrWatchLoop (per-AF)
-12. authoritySelectLoop: 等待 init_timeout → 選擇權威 Controller → 開始寫入 FDB → 更新 firewall peer set
+5. neighborInit()：subscribe netlink + initLocalMACs（同步完成，確保 LocalMACs 有資料）
+6. 啟動 sendloop (per-controller)
+7. 啟動所有 per-controller, per-AF tcpConnLoop
+8. 啟動 probeListenLoop (per-AF)
+9. 啟動 neighborEventLoop（處理 netlink 事件）
+10. 啟動 tapReadLoop, tapWriteLoop
+11. 啟動 fdbReconcileLoop
+12. 啟動 mcastStatsLoop（multicast 統計上報）
+13. 若有 autoip_interface: 啟動 addrWatchLoop (per-AF)
+14. authoritySelectLoop: 等待 init_timeout → 選擇權威 Controller → 開始寫入 FDB → 更新 firewall peer set
 ```
 
 #### 權威 Controller 選擇
@@ -861,16 +865,18 @@ Client A          Controller           Client B, C, D...
 
 ## 7. Debounce 機制
 
-### 7.1 Client: 鄰居表變更（無 debounce，即時增量）
+### 7.1 Client: FDB 變更（無 debounce，即時增量）
 
 ```
-neighborWatchLoop:
-  1. 啟動時 dump 全量 → reportMACs(full=true) 給所有 Controller
-  2. subscribe netlink 事件
+neighborInit()（同步，在 TCP 連線前完成）:
+  1. subscribe netlink 事件
+  2. initLocalMACs(): 讀 FDB 全量 → macMu.WLock → 寫入 LocalMACs → macMu.WUnlock
+
+neighborEventLoop()（goroutine）:
   3. 每個 RTM_NEWNEIGH/RTM_DELNEIGH:
      - 判斷 add 或 delete（RTM_DELNEIGH 或 NUD 狀態不可用 → delete）
-     - 更新本地 LocalMACs
-     - 發送 MACUpdate{is_full=false, routes=[{mac, ip, is_delete}]} 給所有 Controller
+     - macMu.WLock → 更新 LocalMACs → encode incremental → 推入所有 controller sendqueue → macMu.WUnlock
+     - queue 滿 → 只斷該 controller 的 activeAF（CloseDone）
   不使用 debounce：單條增量成本極低，TCP Nagle 自然合併
 ```
 
@@ -915,11 +921,11 @@ neighborWatchLoop:
 ### Client 側（client_com）
 
 - 對每個 Controller 維護多條 AF 連線
-- 收到某 AF 的 Controller 全量更新 → 將該 AF 設為 `ActiveAF`（**跟隨 Controller 決策**）
-- `synced` 在發送本地全量給 Controller 後變為 true
-- sendloop 發送時：若 `activeAF == nil`，直接丟棄（等 controller 發全量更新後才設定 activeAF）；若 `synced == false`，改發全量
-- 某 AF 斷線 → 自動重連（指數退避），不影響其他 AF
-- `activeAF`、`synced`、`AFConns` 受 `ControllerConn.mu` 保護
+- 收到某 AF 的 Controller 全量更新 → 將該 AF 設為 `ActiveAF`（**跟隨 Controller 決策**）→ 推 empty trigger 到 sendqueue
+- `synced` 在 sendloop getFullState() 之後、send 之前設為 true
+- sendloop 流程：dequeue → `activeAF == ""` 則 discard → `!synced` 則 getFullState(RLock) → synced=true → send full → discard item → `synced` 則 send incremental
+- 某 AF 斷線 → 自動重連（指數退避），不影響其他 AF。若斷的是 activeAF → `activeAF=""` + `synced=false`
+- `activeAF`、`synced`、`AFConns` 受 `c.mu` 保護
 
 ### activeAF 語義統一
 
@@ -957,30 +963,24 @@ authorityChangeCh chan struct{}  // Synced 狀態變化時觸發重新評估
 | 鎖 | 保護範圍 | 持有者 |
 |---|---|---|
 | `Controller.mu` | ControllerState, clients map, AFConns, ActiveAF, Synced, debounce timers | handleTCPConn, handleDisconnect, tcpRecvLoop, offlineChecker, triggerSyncNewClient, triggerTopologyUpdate |
-| `ControllerConn.mu` (Client 端) | ActiveAF, Synced, AFConns（per-controller 通訊通道內部狀態）| tcpConnLoop, tcpRecvLoop, sendloop, neighborWatchLoop |
-| `client_state RWLock` | 本地 MAC/neigh 狀態 | neighborWatchLoop(W), sendloop(R via getFullState) |
+| `c.mu` (Client 端) | Controllers map, ActiveAF, MACsSynced, AFConns（per-controller 通訊狀態）| tcpConnLoop, tcpRecvLoop, sendloop, neighborEventLoop |
+| `macMu` (Client 端 RWMutex) | LocalMACs（本地 FDB MAC 表）| neighborEventLoop(W), sendloop(R via getFullState) |
 | `client_side_controller_state RWLock` | Controller 推送的狀態視圖 | tcpRecvLoop(W), fdbReconcileLoop(R) |
 
 ### 死鎖預防
 
-`state.Write()` 持有 WLock 推 queue + sendloop dequeue 後需要 RLock 取全量 = 死鎖風險。
+Client 端有兩把鎖：`macMu`（RWMutex，保護 LocalMACs）和 `c.mu`（Mutex，保護 per-controller 狀態）。
 
-**規則**: state lock 和 queue push 不同時持有。先 unlock，再推 queue：
+**鎖順序**：允許巢狀 `macMu → c.mu`，禁止反向。
 
-```go
-// 正確
-state.WLock()
-更新 state
-msg := 複製增量
-state.WUnlock()
-queue <- msg  // 鎖外
-
-// 錯誤（可能死鎖）
-state.WLock()
-更新 state
-queue <- msg  // 若 queue 滿 + sendloop 需要 RLock → 死鎖
-state.WUnlock()
 ```
+handleNeighEvent (write):  macMu.WLock → c.mu.Lock → c.mu.Unlock → macMu.WUnlock（巢狀）
+sendloop (read):           c.mu.Lock → c.mu.Unlock → macMu.RLock → macMu.RUnlock → c.mu.Lock → c.mu.Unlock（序列，不同時持有）
+```
+
+不存在 A→B / B→A 的死鎖條件。
+
+Queue push 使用 `select { default: }`（非阻塞），queue 滿時斷線而非阻塞，避免 WLock 持有者被 queue 阻塞。
 
 ### client_side_controller_state 寫入觸發 FDB
 
