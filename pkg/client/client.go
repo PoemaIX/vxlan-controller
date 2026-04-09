@@ -1196,11 +1196,12 @@ func (c *Client) apiShowController() ([]ShowControllerEntry, error) {
 			ep := &showCtrlEndpoint{
 				Connected: afc.Connected,
 			}
-			// Find addr from config
-			for _, afCfg := range c.Config.AFSettings {
+			// Find addr from the matching AF config
+			if afCfg, ok := c.Config.AFSettings[af]; ok {
 				for _, ctrl := range afCfg.Controllers {
 					if ctrl.PubKey == ctrlID {
 						ep.Addr = ctrl.Addr.String()
+						break
 					}
 				}
 			}
