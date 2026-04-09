@@ -4,23 +4,27 @@
 
 ---
 
-## 目錄結構（預計）
+## 目錄結構
 
 ```
 vxlan-controller/
 ├── cmd/
-│   ├── controller/main.go      # Controller 入口
-│   ├── client/main.go          # Client 入口
-│   └── keygen/main.go          # 金鑰生成工具
+│   └── vxlan-controller/
+│       ├── main.go             # 統一入口（controller/client/keygen/autogen/vxscli/vxccli 子命令）
+│       ├── vxscli.go           # Controller CLI 工具（show client/route, cost get/set/store）
+│       └── vxccli.go           # Client CLI 工具
 ├── proto/
-│   └── messages.proto          # Protobuf 定義
+│   ├── messages.proto          # Protobuf 定義
+│   └── messages.pb.go          # 生成的 Go 代碼
 ├── pkg/
 │   ├── config/                 # YAML 配置解析
 │   │   ├── client.go
 │   │   ├── controller.go
-│   │   └── defaults.go         # 預設值定義
+│   │   ├── defaults.go         # 預設值定義
+│   │   └── autogen.go          # 從拓撲檔自動生成 controller+client 配置
 │   ├── crypto/                 # Noise IK handshake, ChaCha20-Poly1305, X25519
 │   │   ├── noise.go
+│   │   ├── noise_test.go
 │   │   ├── session.go
 │   │   └── nonce.go
 │   ├── protocol/               # TCP framing, UDP packet, msg_type 定義
@@ -31,9 +35,11 @@ vxlan-controller/
 │   │   ├── controller.go
 │   │   ├── state.go
 │   │   ├── routing.go          # Floyd-Warshall, AdditionalCost 加權, RouteMatrix
-│   │   ├── sync.go             # 全量/增量推送
+│   │   ├── sync.go             # 全量/增量推送（含 per-client filter）
 │   │   ├── addrwatch.go        # autoip_interface: 動態 IP 監聽 (Controller 端)
 │   │   ├── stats.go            # multicast 統計彙整
+│   │   ├── api.go              # Unix socket API（cost.get/set/store, show.client/route）
+│   │   ├── mock.go             # Mock 模式：生成假資料供 WebUI 開發測試
 │   │   └── webui.go            # WebUI 狀態推送橋接
 │   ├── client/                 # Client 核心邏輯
 │   │   ├── client.go
@@ -47,17 +53,19 @@ vxlan-controller/
 │   │   ├── addrwatch.go        # autoip_interface: 動態 IP 監聽 (Client 端)
 │   │   └── mcast_stats.go      # multicast 封包統計追蹤
 │   ├── filter/                 # Lua 過濾系統
-│   │   ├── engine.go           # gopher-lua 執行引擎，四個 hook
+│   │   ├── engine.go           # gopher-lua 執行引擎，四個 hook + 豐富封包欄位萃取
+│   │   ├── builtins.go         # 內建 Lua 模組（require() 支援）
 │   │   ├── config.go           # 過濾配置解析
 │   │   ├── rate.go             # per-MAC / per-client 頻率限制
 │   │   ├── defaults.go         # 預設 Lua 腳本
 │   │   └── addrselect.go       # autoip_interface 地址選擇 Lua 引擎
+│   ├── apisock/                # Unix socket API 框架
+│   │   └── apisock.go          # ListenAndServe + Call 客戶端
 │   ├── vlog/                   # 分級日誌系統
 │   │   └── vlog.go             # error/warn/info/debug/verbose 五級
 │   ├── webui/                  # WebUI 即時管理介面
-│   │   ├── server.go           # HTTP + WebSocket server
-│   │   ├── ws.go               # WebSocket 連線管理
-│   │   └── index.html          # 內嵌 SPA 前端頁面
+│   │   ├── server.go           # HTTP + WebSocket server（index.html 內嵌）
+│   │   └── ws.go               # WebSocket 連線管理
 │   ├── ntp/                    # NTP 校時
 │   │   └── ntp.go
 │   └── types/                  # 共用型別
@@ -74,7 +82,9 @@ vxlan-controller/
 │   ├── test_ip_change.sh
 │   ├── test_no_flood.sh
 │   ├── test_firewall.sh
-│   └── compare_static_vs_controller.sh
+│   ├── compare_static_vs_controller.sh
+│   └── webui/
+│       └── demo.yaml           # WebUI 開發用 mock 配置
 ├── go.mod
 ├── go.sum
 ├── DESIGN.md
@@ -106,8 +116,14 @@ type Endpoint struct {
 // PerClientConfig 是 Controller 配置中每個 Client 的設定
 type PerClientConfig struct {
     ClientID       ClientID
-    ClientName     string          // 標記用，會下發給所有 Client 用於 log 和 WebUI 顯示
-    Filters        *FilterConfig   // 可選，per-client Lua 過濾設定
+    ClientName     string                       // 標記用，會下發給所有 Client 用於 log 和 WebUI 顯示
+    Filters        *FilterConfig                // 可選，per-client Lua 過濾設定
+    AFSettings     map[AFName]*PerClientAFConfig // 可選，per-AF 設定
+}
+
+// PerClientAFConfig 是 Controller 端 per-client per-AF 設定
+type PerClientAFConfig struct {
+    EndpointOverride string  // DDNS 域名或 IP，覆蓋 TCP remote IP 作為 endpoint
 }
 
 // ClientInfo 是 Controller 維護的單一 Client 資訊
@@ -117,7 +133,6 @@ type ClientInfo struct {
     Endpoints      map[AFName]*Endpoint  // 每個 AF 的端點
     LastSeen       time.Time
     Routes         []Type2Route          // Client 上報的 MAC/IP
-    AdditionalCost float64               // 來自 PerClientConfig
 }
 
 // Type2Route 模仿 EVPN Type-2
@@ -126,13 +141,26 @@ type Type2Route struct {
     IP  netip.Addr
 }
 
-// LatencyEntry 用於 LatencyMatrix
-type LatencyEntry struct {
-    LatencyMean    float64
-    LatencyStd     float64
+// AFLatency 儲存兩個 Client 之間某個 AF 的探測結果
+type AFLatency struct {
+    Mean           float64
+    Std            float64
     PacketLoss     float64
     Priority       int
     AdditionalCost float64  // per-AF AdditionalCost，來自 Client 配置
+}
+
+// LatencyInfo 儲存兩個 Client 之間所有 AF 的探測資料
+type LatencyInfo struct {
+    AFs            map[AFName]*AFLatency
+    LastReachable  time.Time  // 最後一次任一 AF 可達的時間
+}
+
+// BestPathEntry 是預先計算的 BestPath 結果
+type BestPathEntry struct {
+    AF   AFName
+    Cost float64     // mean + additional_cost（用於 Floyd-Warshall）
+    Raw  *AFLatency  // 被選中 AF 的完整探測資料
 }
 
 // RouteEntry 用於 RouteMatrix
@@ -168,6 +196,10 @@ type ControllerConfig struct {
     AllowedClients          []PerClientConfig
     LogLevel                string                 // "error"/"warn"/"info"/"debug"/"verbose"
     WebUI                   *WebUIConfig           // nil = 不啟用
+    CostMode                string                 // "probe"（預設）或 "static"
+    StaticCosts             map[string]map[string]map[AFName]float64  // [src_name][dst_name][af] → cost
+    APISocket               string                 // Unix socket 路徑（預設由 defaults 決定）
+    ConfigPath              string                 // 配置檔路徑，用於 cost.store 回寫
 }
 
 type ControllerAFConfig struct {
@@ -216,34 +248,50 @@ type Controller struct {
     State           *ControllerState
 
     // === Per-AF Listener ===
-    AFListeners     map[AFName]*AFListener
+    afListeners     map[AFName]*AFListener
 
     // === Per-Client 連線管理 ===
     clients         map[ClientID]*ClientConn
 
-    // === Per-Client 統計 ===
-    mcastStats      map[ClientID]*McastStats  // multicast 統計（由 Client 上報）
+    // === UDP Session 管理 ===
+    udpSessions     *crypto.SessionManager      // UDP handshake session 查找
+    udpAddrs        map[udpAddrKey]*net.UDPAddr  // 追蹤 client 的 UDP 來源地址
 
     // === Debounce timers ===
-    newClientTimer  *time.Timer         // sync_new_client_debounce
-    topoTimer       *time.Timer         // topology_update_debounce
-    offlineTicker   *time.Ticker        // 定期檢查 ClientOfflineTimeout
+    newClientTimer    *time.Timer       // sync_new_client_debounce
+    newClientMaxTimer *time.Timer       // sync_new_client_debounce_max
+    newClientFirst    time.Time         // 首次新 client 連入的時間
+    topoTimer         *time.Timer       // topology_update_debounce
+    topoMaxTimer      *time.Timer       // topology_update_debounce_max
+    topoFirst         time.Time         // 首次收到 ProbeResults 的時間
 
-    // === WebUI ===
-    webUI           *webui.Server       // nil if not configured
+    // === Probe ===
+    probeCounter    uint64              // 遞增的 probe_id 計數器
+    probeTicker     *time.Ticker        // 週期性 probe 觸發器
+
+    // === Per-Client 統計 ===
+    clientMcastStats map[ClientID]*ClientMcastStats
+
+    // === autoip_interface ===
+    addrEngines     map[AFName]*filter.AddrSelectEngine
+
+    // === Cost Mode ===
+    CostMode        string              // "probe" 或 "static"
+    staticCostsByID map[ClientID]map[ClientID]map[AFName]float64
+
+    // === 生命週期 ===
+    ctx             context.Context
+    cancel          context.CancelFunc
+    allowedKeys     [][32]byte          // 允許的 client 公鑰列表
 }
 
 type ControllerState struct {
-    Clients         map[ClientID]*ClientInfo
-    LatencyMatrix   map[ClientID]map[ClientID]*SelectedLatency  // [src][dst]
-    RouteMatrix     map[ClientID]map[ClientID]*RouteEntry       // [src][dst]
-    RouteTable      []*RouteTableEntry
+    Clients          map[ClientID]*ClientInfo
+    LatencyMatrix    map[ClientID]map[ClientID]*LatencyInfo      // [src][dst]，保存所有 AF 探測資料
+    BestPaths        map[ClientID]map[ClientID]*BestPathEntry    // [src][dst]，預先計算的最佳 AF 選擇
+    RouteMatrix      map[ClientID]map[ClientID]*RouteEntry       // [src][dst]
+    RouteTable       []*RouteTableEntry
     LastClientChange time.Time
-}
-
-type SelectedLatency struct {
-    Latency float64
-    AF      AFName
 }
 
 // AFListener 管理某個 AF 上的 TCP + UDP 監聽
@@ -268,6 +316,7 @@ type ClientConn struct {
     ActiveAF    AFName                 // 當前 active 的 AF（Controller 選擇最早連線的 AF）
     Synced      bool                   // 已發送全量給 Client，後續可發增量
     SendQueue   chan QueueItem         // buffered channel 作為發送佇列
+    Filters     *filter.FilterSet      // per-client Lua 過濾集（來自 PerClientConfig）
 }
 
 type AFConn struct {
@@ -297,9 +346,13 @@ main goroutine
  │
  ├─ offlineChecker()                    // 定期掃描 LastSeen，超時則移除 Client
  │
- ├─ [per-AF, optional] addrWatchLoop(af)  // autoip_interface: 監聽網卡地址變更
+ ├─ periodicProbeLoop()                 // 定期觸發 ControllerProbeRequest
+ │
+ ├─ [optional] addrWatchLoop()          // autoip_interface: 監聽網卡地址變更
  │
  ├─ [optional] webUI.Run()              // WebUI HTTP + WebSocket server
+ │
+ ├─ apiServer()                         // Unix socket API (cost.get/set/store, show.client/route)
  │
  └─ signalHandler()                     // 處理 SIGTERM/SIGINT 優雅關閉
 ```
@@ -308,11 +361,13 @@ main goroutine
 |-----------|------|------|
 | `tcpAcceptLoop` | N (每個 AF 一個) | `net.Listener.Accept()` 迴圈，每個新連線 spawn `handleTCPConn` |
 | `handleTCPConn` | M (每條 TCP 連線) | 執行 Noise IK handshake → 識別 ClientID → 進入訊息讀取迴圈，處理 ClientRegister / MAC 上報 / ProbeResults / McastStats 等 |
-| `udpReadLoop` | N (每個 AF 一個) | 讀取 UDP 封包，解密後分發 MulticastForward（轉發給其他 Client） |
+| `udpReadLoop` | N (每個 AF 一個) | 讀取 UDP 封包，解密後分發 MulticastForward（轉發給其他 Client）或處理 UDP handshake |
 | `clientSendLoop` | K (每個已連線 Client 一個) | 從 `SendQueue` channel 取出訊息 → 透過 active AF 的 TCP 連線加密發送。當 `Synced=false` 時觸發重新全量同步 |
 | `offlineChecker` | 1 | 每隔 N 秒掃描所有 Client 的 `LastSeen`，超過 `ClientOfflineTimeout` 且無 active TCP 連線的才移除並重算路由。有 active 連線時刷新 `LastSeen` |
-| `addrWatchLoop` | 0-N (每個使用 autoip_interface 的 AF) | netlink 監聽網卡地址/連結事件 → 1s debounce → 執行 Lua select() → 重新綁定 listener（IPv6 DAD 指數退避） |
+| `periodicProbeLoop` | 1 | 按 `probe_interval_s` 週期觸發 ControllerProbeRequest（獨立於 sync_new_client_debounce） |
+| `addrWatchLoop` | 0-1 (有任一 AF 使用 autoip_interface 時啟動) | netlink 監聯網卡地址/連結事件 → 1s debounce → 執行 Lua select() → 重新綁定 listener（IPv6 DAD 指數退避） |
 | `webUI.Run` | 0-1 | HTTP server 提供 `/`（SPA）、`/ws`（WebSocket 每秒推送狀態）、`/api/state`（JSON） |
+| `apiServer` | 1 | Unix socket API，支援 cost.get/getmode/setmode/store、show.client/route 等指令 |
 
 ### 2.3 Controller 關鍵流程
 
@@ -406,9 +461,12 @@ handleProbeResults:
 
 topoTimer 到期:
   1. mu.Lock()
-  2. 對 LatencyMatrix 套用 AdditionalCost 加權:
-     cost[src][dst] = latency[src][dst] + AdditionalCost[dst]
-  3. FloydWarshall(加權後的 cost matrix) → RouteMatrix
+  2. computeCurrentBestPaths():
+     - CostMode=="probe": ComputeBestPaths(LatencyMatrix) → BestPaths
+       每條邊 cost = latency_mean + AdditionalCost[af]
+     - CostMode=="static": ComputeBestPathsStatic(LatencyMatrix, staticCosts) → BestPaths
+       使用靜態 cost，但仍檢查 probe 可達性（PacketLoss < 1.0）
+  3. FloydWarshall(BestPaths) → RouteMatrix
   4. delta = diff(oldRouteMatrix, newRouteMatrix)
   5. 推送 delta 給所有 Synced Client
   6. mu.Unlock()
@@ -429,13 +487,15 @@ type ClientConfig struct {
     NeighSuppress       bool              // 是否在 vxlan device 和 tap-inject 上啟用 neigh_suppress
     VxlanFirewall       bool              // 是否啟用 nftables VXLAN 注入防護
     VxlanFirewallTable  string            // nftables table 名稱（預設 "vxlan_fw"）
-    StatsIntervalS      int               // multicast 統計上報間隔（預設 5s）
     AFSettings          map[AFName]*ClientAFConfig
     InitTimeout         time.Duration     // 預設 10s
+    StatsInterval       time.Duration     // multicast 統計上報間隔（預設 5s）
     NTPServers          []string
-    NTPPeriodH          int               // NTP 校時週期（小時）
+    NTPPeriod           time.Duration     // NTP 校時週期
+    NTPRTTThreshold     time.Duration     // NTP RTT 門檻（預設 50ms），超過則忽略該 server
     LogLevel            string            // "error"/"warn"/"info"/"debug"/"verbose"
     Filters             *FilterConfig     // Lua 過濾系統配置
+    APISocket           string            // Unix socket 路徑
 }
 
 type ClientAFConfig struct {
@@ -492,7 +552,6 @@ type Client struct {
     AuthorityCtrl *ControllerID         // 當前權威 Controller（nil = 未選定）
 
     // === 網路設備 ===
-    Bridge        string                // bridge name
     VxlanDevs     map[AFName]*VxlanDev  // 每個 AF 的 vxlan device
     TapFD         *os.File              // tap-inject 的 fd
 
@@ -504,22 +563,35 @@ type Client struct {
     CurrentFDB    map[fdbKey]fdbEntry   // 目前已寫入 kernel 的 FDB
 
     // === Probe ===
-    probeSessions    *SessionManager       // probe channel 的 session 管理
-    probeConns       map[AFName]*net.UDPConn // 每個 AF 的 probe UDP socket
-    probeResponseChs map[uint64]chan probeResponseData // probe_id → response 收集器
-    probeResultsMu   sync.Mutex
+    probeSessions     *crypto.SessionManager       // probe channel 的 session 管理
+    probeConns        map[AFName]*net.UDPConn      // 每個 AF 的 probe UDP socket
+    pendingHandshakes map[ClientID]*crypto.HandshakeState  // 進行中的 outbound handshake
+    probeResponseChs  map[uint64]chan probeResponseData     // probe_id → response 收集器
+    lastProbeTime     time.Time                    // 上次 probe 執行時間
+    lastProbeResults  map[ClientID]*LocalProbeResult        // 上次 probe 結果（供 CLI 查詢）
 
     // === NTP ===
-    TimeOffset    time.Duration         // 本地時鐘與 NTP 的偏差
+    ntp           *ntp.TimeSync         // NTP 校時（含 RTT 門檻過濾）
 
     // === Lua 過濾 ===
-    filterEngine  *filter.Engine        // Lua 過濾引擎（input/output mcast/route）
+    Filters       *filter.FilterSet     // Lua 過濾集（input/output mcast/route）
 
     // === Multicast 統計 ===
-    mcastStats    *McastStatsTracker    // per-MAC 封包統計追蹤
+    mcastStats    *McastStats           // per-MAC 封包統計追蹤
 
-    // === VXLAN 防火牆 ===
-    firewall      *FirewallManager      // nftables 注入防護（nil if disabled）
+    // === autoip_interface ===
+    addrEngines   map[AFName]*filter.AddrSelectEngine
+
+    // === 通知 Channel ===
+    fdbNotifyCh       chan struct{}      // RouteMatrix/RouteTable 變更時通知 FDB reconcile
+    fwNotifyCh        chan struct{}      // peer 變更時通知 firewall 更新
+    authorityChangeCh chan struct{}      // Controller Synced 狀態變化時觸發權威重評估
+    tapInjectCh       chan []byte        // Controller relay 的 broadcast 封包注入 TAP
+    initDone          chan struct{}      // init_timeout 完成後 close
+
+    // === 生命週期 ===
+    ctx           context.Context
+    cancel        context.CancelFunc
 }
 
 // ControllerConn 代表 Client 與單一 Controller 的連線狀態（client_com）
@@ -528,8 +600,9 @@ type ControllerConn struct {
     AFConns       map[AFName]*ClientAFConn
     ActiveAF      AFName               // 收到 Controller 全量更新的 AF（Controller 決定，Client 跟隨）
     State         *ControllerView      // 該 Controller 推送的狀態（client_side_controller_state）
-    Synced        bool                 // 是否已發送本地全量給 Controller（進入增量模式）
-    mu            sync.Mutex           // 保護 ActiveAF, Synced, AFConns 等內部狀態
+    Synced        bool                 // 是否已收到 Controller 全量更新
+    MACsSynced    bool                 // 是否已發送本地 MAC 全量給 Controller（進入增量模式）
+    SendQueue     chan ClientQueueItem  // buffered channel 作為發送佇列
 }
 
 type ControllerView struct {
@@ -544,9 +617,12 @@ type ClientAFConn struct {
     AF          AFName
     TCPConn     net.Conn
     Session     *crypto.Session
-    UDPConn     net.PacketConn        // probe channel (per-AF)
+    CommUDPConn net.PacketConn        // UDP communication channel（multicast relay）
+    UDPSession  *crypto.Session       // UDP session（handshake 後建立）
     Cancel      context.CancelFunc
     Connected   bool
+    Done        chan struct{}          // close 時通知 goroutine 停止
+    Cleaned     chan struct{}          // handleDisconnect 完成清理後 close
 }
 
 type VxlanDev struct {
@@ -569,10 +645,13 @@ main goroutine
  │
  ├─ initDevices()                              // 建立 bridge, vxlan, tap-inject (一次性)
  │
- ├─ [per-controller, per-AF] tcpConnLoop(ctrl, af)   // TCP 連線 + 重連迴圈
- │   └─ tcpRecvLoop(ctrl, af)                        // 讀取 Controller 推送的訊息
+ ├─ [per-controller] controllerSendLoop(ctrl)         // 從 SendQueue 取訊息，透過 active AF 的 TCP 發送
  │
- ├─ [per-AF] probeListenLoop(af)               // 監聯 probe channel UDP，回覆 ProbeResponse
+ ├─ [per-controller, per-AF] tcpConnLoop(ctrl, af)   // TCP 連線 + 重連迴圈
+ │   ├─ tcpRecvLoop(ctrl, af)                        // 讀取 Controller 推送的訊息
+ │   └─ commUDPReadLoop(ctrl, af)                    // 讀取 UDP multicast deliver 封包
+ │
+ ├─ [per-AF] probeListenLoop(af)               // 監聽 probe channel UDP，回覆 ProbeResponse
  │
  ├─ neighborInit()                             // 同步：subscribe + initLocalMACs（在 TCP 連線前完成）
  ├─ neighborEventLoop()                       // goroutine：處理 netlink 事件
@@ -585,30 +664,32 @@ main goroutine
  │
  ├─ authoritySelectLoop()                      // init_timeout 後選擇權威 Controller，後續持續監控切換
  │
- ├─ mcastStatsLoop()                           // 定期快照 multicast 統計並上報 Controller
+ ├─ mcastStatsReportLoop()                     // 定期快照 multicast 統計並上報 Controller
  │
- ├─ [per-AF, optional] addrWatchLoop(af)       // autoip_interface: 監聽網卡地址變更
+ ├─ [optional] addrWatchLoop()                 // autoip_interface: 監聽網卡地址變更
  │
- ├─ [optional] firewallManager()               // vxlan_firewall: 管理 nftables 規則和 IP set
+ ├─ [optional] firewallLoop()                  // vxlan_firewall: 管理 nftables 規則和 IP set
  │
  └─ apiServer()                                // 暴露 API (讀寫 bind_addr 等)
 ```
 
 | Goroutine | 數量 | 職責 |
 |-----------|------|------|
-| `ntpSyncLoop` | 1 | 定期向 `ntp_servers` 校時，更新 `TimeOffset` |
-| `tcpConnLoop` | C*A (每個 Controller 的每個 AF) | 建立 TCP → Noise IK handshake → 發送 ClientRegister → 啟動 `tcpRecvLoop`。斷線後指數退避重連（1s→2s→...→30s），連線存活超過 10s 時重設退避 |
-| `tcpRecvLoop` | C*A | 讀取 TCP 訊息（ControllerState / ControllerStateUpdate），更新 `ControllerView`。收到全量更新時切換 `ActiveAF` |
-| `probeListenLoop` | A (每個 AF) | 監聽 probe UDP port，收到 ProbeRequest 解析 payload 取出 probe_id + src_timestamp，回覆 ProbeResponse{probe_id, dst_timestamp, src_timestamp}。收到 ProbeResponse 按 probe_id 路由到對應批次收集器 |
+| `ntpSyncLoop` | 1 | 定期向 `ntp_servers` 校時，更新 `TimeOffset`。支援 RTT 門檻過濾（`ntp_rtt_threshold_ms`） |
+| `controllerSendLoop` | C (每個 Controller 一個) | 從 `SendQueue` channel 取出訊息 → 透過 active AF 的 TCP 發送。`MACsSynced=false` 時發全量 MAC 表 |
+| `tcpConnLoop` | C*A (每個 Controller 的每個 AF) | 建立 TCP → Noise IK handshake → 發送 ClientRegister → UDP handshake → 啟動 `tcpRecvLoop` + `commUDPReadLoop`。斷線後指數退避重連（1s→2s→...→30s），連線存活超過 10s 時重設退避 |
+| `tcpRecvLoop` | C*A | 讀取 TCP 訊息（ControllerState / ControllerStateUpdate / ControllerProbeRequest），更新 `ControllerView`。收到全量更新時切換 `ActiveAF` |
+| `commUDPReadLoop` | C*A | 讀取 UDP communication channel 的 MulticastDeliver 封包 → input_mcast 過濾 → 推入 tapInjectCh |
+| `probeListenLoop` | A (每個 AF) | 監聽 probe UDP port，處理 handshake（含 tie-breaking）、ProbeRequest 回覆 ProbeResponse、ProbeResponse 按 probe_id 路由到對應批次收集器 |
 | `neighborInit` + `neighborEventLoop` | 1 | `neighborInit`（同步）：subscribe netlink + `initLocalMACs`（讀 FDB 寫入 LocalMACs），在 TCP 連線前完成。`neighborEventLoop`（goroutine）：處理 `RTM_NEWNEIGH` / `RTM_DELNEIGH`，macMu.WLock → 更新 LocalMACs → 推 incremental 到所有 sendqueue → macMu.WUnlock。上報前套用 output_route Lua filter |
 | `tapReadLoop` | 1 | 從 `TapFD` 讀取 broadcast 封包 → output_mcast Lua filter → rate limit → 統計 → 透過 active AF 的 UDP 上傳 Controller (MulticastForward) |
-| `tapWriteLoop` | 1 | 從 channel 取出 Controller relay 來的 broadcast 封包 → input_mcast Lua filter → 統計 → 寫入 `TapFD` 注入 bridge |
-| `fdbReconcileLoop` | 1 | 監聽 `RouteMatrix` 或 `RouteTable` 變更通知 (channel) → 重新計算 FDB → diff 寫入 kernel (`netlink`)。FDB 使用 master+self split：master entry (NUD_NOARP) 告訴 bridge 轉發到 vxlan port，self entry (NUD_PERMANENT) 告訴 vxlan device 封裝目標 IP |
-| `authoritySelectLoop` | 1 | `init_timeout` 後選擇權威 Controller；之後當 Controller Synced 狀態變化時重新評估。權威切換時觸發 firewall 規則更新 |
-| `mcastStatsLoop` | 1 | 每 `stats_interval_s` 快照 multicast 統計（per-MAC TxAccepted/TxRejected/RxAccepted/RxRejected + reject reasons）→ 透過 protobuf `MACMcastStats` 上報所有 Controller |
-| `addrWatchLoop` | 0-A (每個使用 autoip_interface 的 AF) | netlink 監聽網卡地址/連結事件 → 1s debounce → 執行 Lua select() → 更新 bind_addr → ip link set 更新 vxlan local → 關閉 TCP/UDP 強制重連 → 重建 firewall 規則 |
-| `firewallManager` | 0-1 (啟用 vxlan_firewall 時) | 建立 nftables table + INPUT chain + per-AF IP set → 根據 authority controller 的 peer 列表更新 set elements → bind_addr 變更時重建規則 |
-| `apiServer` | 1 | Unix socket API (`/tmp/vxlan-client-<id>.sock`)，支援 `GET_BIND_ADDR <af>` 和 `UPDATE_BIND_ADDR <af> <ip>` 指令。更新時：修改 config → `ip link set` 更新 VXLAN local → 關閉 TCP/UDP 連線強制重連 → 重啟 probe listener |
+| `tapWriteLoop` | 1 | 從 `tapInjectCh` 取出封包 → 寫入 `TapFD` 注入 bridge |
+| `fdbReconcileLoop` | 1 | 監聽 `fdbNotifyCh` 通知 → 重新計算 FDB → diff 寫入 kernel (`netlink`)。FDB 使用 master+self split：master entry (NUD_NOARP) 告訴 bridge 轉發到 vxlan port，self entry (NUD_PERMANENT) 告訴 vxlan device 封裝目標 IP |
+| `authoritySelectLoop` | 1 | `init_timeout` 後選擇權威 Controller；之後監聽 `authorityChangeCh` 重新評估。權威切換時觸發 firewall 規則更新 |
+| `mcastStatsReportLoop` | 1 | 每 `stats_interval` 快照 multicast 統計（per-MAC TxAccepted/TxRejected/RxAccepted/RxRejected + reject reasons）→ 透過 protobuf `McastStatsReport` 上報所有 Controller |
+| `addrWatchLoop` | 0-1 (有任一 AF 使用 autoip_interface 時啟動) | netlink 監聽網卡地址/連結事件 → 1s debounce → 執行 Lua select() → 更新 bind_addr → 重建 firewall 規則 |
+| `firewallLoop` | 0-1 (啟用 vxlan_firewall 時) | 監聽 `fwNotifyCh` → 根據 authority controller 的 peer 列表更新 nftables set elements → bind_addr 變更時重建規則 |
+| `apiServer` | 1 | Unix socket API，支援 bind_addr 查詢和更新等指令 |
 
 ### 3.3 Client 關鍵流程
 
@@ -716,11 +797,13 @@ type Session struct {
     RemoteIndex  uint32
     SendKey      [32]byte
     RecvKey      [32]byte
-    SendCounter  atomic.Uint64    // nonce counter (發送方向)
-    RecvCounter  uint64           // 上次驗證的 counter (TCP: 嚴格遞增)
-    RecvWindow   *SlidingWindow   // UDP only: 2048-bit sliding window 防 replay
+    SendCounter  NonceCounter     // nonce counter (發送方向，atomic)
+    RecvTCPCounter TCPCounter     // TCP: 嚴格遞增 counter
+    RecvWindow   SlidingWindow    // UDP only: 2048-bit sliding window 防 replay
     PeerID       ClientID         // 握手後關聯的對端 ID
+    IsUDP        bool             // 是否為 UDP session（決定用 RecvWindow 或 RecvTCPCounter）
     CreatedAt    time.Time
+    LastRecv     time.Time        // 最後收到訊息的時間（用於 session 過期）
 }
 
 type SlidingWindow struct {
@@ -736,13 +819,15 @@ type SlidingWindow struct {
 func HandshakeInitiate(
     localStatic  [32]byte,  // private key
     remoteStatic [32]byte,  // peer public key
+    localIndex   uint32,    // 本端分配的 session index
 ) (initMsg []byte, state *HandshakeState, err error)
 
 // Responder 端
 func HandshakeRespond(
     localStatic [32]byte,
     initMsg     []byte,
-    allowedKeys []ClientID,  // Controller: Allowed_Clients; Client: controller pubkeys
+    allowedKeys [][32]byte,  // Controller: Allowed_Clients; Client: controller pubkeys
+    localIndex  uint32,      // 本端分配的 session index
 ) (respMsg []byte, session *Session, err error)
 
 // Initiator 完成
@@ -759,8 +844,8 @@ func HandshakeFinalize(
 ### 5.1 TCP Framing
 
 ```go
-// TCP 訊息格式: [4B length][1B msg_type][NB encrypted_payload]
-// length = 1 + N
+// TCP 訊息格式: [4B length][1B msg_type][8B counter][NB ciphertext]
+// length = 1 + 8 + N
 
 func WriteTCPMessage(conn net.Conn, session *Session, msgType MsgType, payload []byte) error
 func ReadTCPMessage(conn net.Conn, session *Session) (msgType MsgType, payload []byte, err error)
@@ -789,7 +874,7 @@ const (
     MsgClientRegister    MsgType = 0x10
     MsgMACUpdate         MsgType = 0x11
     MsgProbeResults      MsgType = 0x12
-    MsgMcastStats        MsgType = 0x13  // multicast 統計上報
+    MsgMcastStatsReport  MsgType = 0x13  // multicast 統計上報
 
     // Controller → Client (TCP)
     MsgControllerState       MsgType = 0x20  // 全量
@@ -963,7 +1048,7 @@ authorityChangeCh chan struct{}  // Synced 狀態變化時觸發重新評估
 | 鎖 | 保護範圍 | 持有者 |
 |---|---|---|
 | `Controller.mu` | ControllerState, clients map, AFConns, ActiveAF, Synced, debounce timers | handleTCPConn, handleDisconnect, tcpRecvLoop, offlineChecker, triggerSyncNewClient, triggerTopologyUpdate |
-| `c.mu` (Client 端) | Controllers map, ActiveAF, MACsSynced, AFConns（per-controller 通訊狀態）| tcpConnLoop, tcpRecvLoop, sendloop, neighborEventLoop |
+| `c.mu` (Client 端) | Controllers map, AuthorityCtrl, ActiveAF, MACsSynced, AFConns（per-controller 通訊狀態）| tcpConnLoop, tcpRecvLoop, controllerSendLoop, neighborEventLoop |
 | `macMu` (Client 端 RWMutex) | LocalMACs（本地 FDB MAC 表）| neighborEventLoop(W), sendloop(R via getFullState) |
 | `client_side_controller_state RWLock` | Controller 推送的狀態視圖 | tcpRecvLoop(W), fdbReconcileLoop(R) |
 

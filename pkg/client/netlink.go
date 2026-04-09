@@ -240,6 +240,9 @@ func (c *Client) buildMSSRuleset(useRtMtu bool) string {
 }
 
 func (c *Client) setupNftables() error {
+	// Delete existing table first to avoid duplicate rules on restart
+	c.cleanupNftables()
+
 	// Try "rt mtu" first (optimal, uses route PMTU). Falls back to fixed MSS
 	// calculated from VXLAN MTU if rt mtu is unavailable (e.g. LXC containers).
 	ruleset := c.buildMSSRuleset(true)
