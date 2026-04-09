@@ -211,28 +211,22 @@ func (c *Client) createTapInject() error {
 	return nil
 }
 
-func (c *Client) buildMSSRuleset(useRtMtu bool) string {
+func (c *Client) buildMSSRuleset() string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("table bridge %s {\n", c.Config.ClampMSSTable))
 	sb.WriteString("    chain forward {\n")
 	sb.WriteString("        type filter hook forward priority filter; policy accept;\n")
 	for _, vd := range c.VxlanDevs {
-		if useRtMtu {
-			fmt.Fprintf(&sb, "        oifname \"%s\" ether type { ip, ip6 } tcp flags syn tcp option maxseg size set rt mtu\n", vd.Name)
-			fmt.Fprintf(&sb, "        iifname \"%s\" ether type { ip, ip6 } tcp flags syn tcp option maxseg size set rt mtu\n", vd.Name)
-		} else {
-			// Fallback: fixed MSS from VXLAN MTU (for LXC where rt mtu is unavailable)
-			mtu := vd.MTU
-			if mtu <= 0 {
-				mtu = 1400
-			}
-			mss4 := mtu - 40 // IPv4: 20 IP + 20 TCP
-			mss6 := mtu - 60 // IPv6: 40 IP + 20 TCP
-			fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
-			fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
-			fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
-			fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
+		mtu := vd.MTU
+		if mtu <= 0 {
+			mtu = 1400
 		}
+		mss4 := mtu - 40 // IPv4: 20 IP + 20 TCP
+		mss6 := mtu - 60 // IPv6: 40 IP + 20 TCP
+		fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
+		fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
+		fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
+		fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
 	}
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n")
@@ -243,24 +237,13 @@ func (c *Client) setupNftables() error {
 	// Delete existing table first to avoid duplicate rules on restart
 	c.cleanupNftables()
 
-	// Try "rt mtu" first (optimal, uses route PMTU). Falls back to fixed MSS
-	// calculated from VXLAN MTU if rt mtu is unavailable (e.g. LXC containers).
-	ruleset := c.buildMSSRuleset(true)
+	ruleset := c.buildMSSRuleset()
 	cmd := exec.Command("nft", "-f", "/dev/stdin")
 	cmd.Stdin = strings.NewReader(ruleset)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		vlog.Warnf("[Client] nft rt mtu not supported, falling back to fixed MSS: %s", strings.TrimSpace(string(out)))
-		ruleset = c.buildMSSRuleset(false)
-		cmd2 := exec.Command("nft", "-f", "/dev/stdin")
-		cmd2.Stdin = strings.NewReader(ruleset)
-		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-			return fmt.Errorf("nft: %v: %s", err2, strings.TrimSpace(string(out2)))
-		}
-		vlog.Infof("[Client] nftables MSS clamping configured (fixed MSS from MTU)")
-		return nil
+		return fmt.Errorf("nft: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-
-	vlog.Infof("[Client] nftables MSS clamping configured (rt mtu)")
+	vlog.Infof("[Client] nftables MSS clamping configured")
 	return nil
 }
 
