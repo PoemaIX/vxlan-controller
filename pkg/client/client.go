@@ -717,11 +717,9 @@ func (c *Client) handleControllerState(ctrlID types.ControllerID, af types.AFNam
 	default:
 	}
 
-	// Trigger sendloop to send full MACs (MACsSynced=false ensures full send)
-	select {
-	case cc.SendQueue <- ClientQueueItem{}:
-	default:
-	}
+	// Connection ready — snapshot LocalMACs and push full update to this controller.
+	// Atomic under c.mu: no incremental can slip between snapshot and mark.
+	c.triggerFullMACs(cc)
 
 	c.mu.Unlock()
 
@@ -867,26 +865,19 @@ func (c *Client) filterRouteTable(rt []*types.RouteTableEntry) []*types.RouteTab
 }
 
 // controllerSendLoop dequeues items and sends to the controller.
-// If activeAF is empty, items are discarded (client waits for controller to pick).
+// It is a pure sender — callers are responsible for encoding the correct
+// data (full or incremental) into the queue item.
 func (c *Client) controllerSendLoop(cc *ControllerConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
 		if cc.ActiveAF == "" {
 			c.mu.Unlock()
-			continue // discard — wait for controller to select AF
+			continue // discard — wait for controller to pick AF
 		}
 		afc := cc.AFConns[cc.ActiveAF]
 		if afc == nil {
 			c.mu.Unlock()
 			continue
-		}
-		needFullMACs := !cc.MACsSynced
-		if needFullMACs {
-			item.State = c.getFullMACsEncoded()
-			// Mark synced immediately so concurrent neighbor events queue
-			// incremental updates instead of being silently dropped.
-			// If the write below fails we revert to false.
-			cc.MACsSynced = true
 		}
 		c.mu.Unlock()
 
@@ -895,11 +886,9 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 			msgType := protocol.MsgType(item.State[0])
 			payload := item.State[1:]
 			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
-				if needFullMACs {
-					c.mu.Lock()
-					cc.MACsSynced = false
-					c.mu.Unlock()
-				}
+				// Connection is likely broken; handleClientDisconnect
+				// will set MACsSynced=false and reconnect will trigger
+				// a new full sync via handleControllerState.
 				continue
 			}
 		}
@@ -932,6 +921,29 @@ func (c *Client) handleClientDisconnect(cc *ControllerConn, af types.AFName, afc
 		// No drain — sendloop will overwrite State with full MACs on next dequeue.
 	}
 	// Non-activeAF disconnect: just cleared the handle, nothing else.
+}
+
+// triggerFullMACs snapshots LocalMACs, encodes a full MACUpdate, and pushes
+// it to this controller's send queue. On success it marks MACsSynced=true
+// atomically (under the same lock acquisition that reads LocalMACs), so no
+// incremental update can slip between the snapshot and the mark.
+// Must be called with c.mu held.
+func (c *Client) triggerFullMACs(cc *ControllerConn) {
+	if cc.ActiveAF == "" {
+		return
+	}
+	msg := c.getFullMACsEncoded()
+	if msg == nil {
+		return
+	}
+	select {
+	case cc.SendQueue <- ClientQueueItem{State: msg}:
+		cc.MACsSynced = true
+	default:
+		cc.MACsSynced = false
+		vlog.Warnf("[Client] send queue full for controller %s, deferring full MAC sync",
+			cc.ControllerID.Hex()[:8])
+	}
 }
 
 // getFullMACsEncoded returns encoded full MACUpdate from LocalMACs.

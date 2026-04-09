@@ -120,18 +120,16 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 	c.mu.Lock()
 	for _, cc := range c.Controllers {
 		if !cc.MACsSynced {
-			// sendloop will replace State with full MACs, but we still need
-			// to wake it up — push an empty trigger so it doesn't block.
-			select {
-			case cc.SendQueue <- ClientQueueItem{}:
-			default:
-			}
+			// Not synced — send full snapshot instead of incremental.
+			c.triggerFullMACs(cc)
 			continue
 		}
 		select {
 		case cc.SendQueue <- ClientQueueItem{State: msg}:
 		default:
+			// Queue full — incremental lost. Send full to recover.
 			cc.MACsSynced = false
+			c.triggerFullMACs(cc)
 		}
 	}
 	c.mu.Unlock()
@@ -209,16 +207,11 @@ func (c *Client) dumpLocalState() {
 
 	c.mu.Lock()
 	c.LocalMACs = routes
-	// Force full resync: if a controller connected before dumpLocalState
-	// completed, the sendloop may have already sent an empty full update
-	// (LocalMACs was still nil). Reset MACsSynced so the next dequeue
-	// sends the actual data.
+	// Push full MACs to all connected controllers.
+	// If a controller connected before this dump completed, it may have
+	// received an empty full update — this corrects it.
 	for _, cc := range c.Controllers {
-		cc.MACsSynced = false
-		select {
-		case cc.SendQueue <- ClientQueueItem{}:
-		default:
-		}
+		c.triggerFullMACs(cc)
 	}
 	c.mu.Unlock()
 }
