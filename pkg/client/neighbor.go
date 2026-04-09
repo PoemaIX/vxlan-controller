@@ -209,8 +209,12 @@ func (c *Client) dumpLocalState() {
 
 	c.mu.Lock()
 	c.LocalMACs = routes
-	// Trigger sendloop for each controller (MACsSynced=false ensures full send)
+	// Force full resync: if a controller connected before dumpLocalState
+	// completed, the sendloop may have already sent an empty full update
+	// (LocalMACs was still nil). Reset MACsSynced so the next dequeue
+	// sends the actual data.
 	for _, cc := range c.Controllers {
+		cc.MACsSynced = false
 		select {
 		case cc.SendQueue <- ClientQueueItem{}:
 		default:
