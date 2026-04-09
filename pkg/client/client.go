@@ -883,6 +883,10 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 		needFullMACs := !cc.MACsSynced
 		if needFullMACs {
 			item.State = c.getFullMACsEncoded()
+			// Mark synced immediately so concurrent neighbor events queue
+			// incremental updates instead of being silently dropped.
+			// If the write below fails we revert to false.
+			cc.MACsSynced = true
 		}
 		c.mu.Unlock()
 
@@ -891,12 +895,12 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 			msgType := protocol.MsgType(item.State[0])
 			payload := item.State[1:]
 			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
+				if needFullMACs {
+					c.mu.Lock()
+					cc.MACsSynced = false
+					c.mu.Unlock()
+				}
 				continue
-			}
-			if needFullMACs {
-				c.mu.Lock()
-				cc.MACsSynced = true
-				c.mu.Unlock()
 			}
 		}
 
