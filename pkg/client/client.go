@@ -249,12 +249,16 @@ func (c *Client) Run() error {
 		}
 	}
 
+	// Step 4: Initialize local state (subscribe + dump FDB).
+	// Must complete before TCP connections so sendloops never read empty LocalMACs.
+	neighCh, neighDone := c.neighborInit()
+
 	// Start sendloops for all controllers
 	for _, cc := range c.Controllers {
 		go c.controllerSendLoop(cc)
 	}
 
-	// Step 4: Start TCP connections to all controllers
+	// Step 5: Start TCP connections to all controllers
 	for _, afCfg := range c.Config.AFSettings {
 		if !afCfg.Enable {
 			continue
@@ -265,7 +269,7 @@ func (c *Client) Run() error {
 		}
 	}
 
-	// Step 5: Start probe listeners
+	// Step 5b: Start probe listeners
 	for afName := range c.Config.AFSettings {
 		if !c.Config.AFSettings[afName].Enable {
 			continue
@@ -273,11 +277,11 @@ func (c *Client) Run() error {
 		go c.probeListenLoop(afName)
 	}
 
-	// Step 5b: Start addr watch for autoip_interface AFs
+	// Step 5c: Start addr watch for autoip_interface AFs
 	go c.addrWatchLoop()
 
-	// Step 6: Start neighbor watch
-	go c.neighborWatchLoop()
+	// Step 6: Start neighbor event loop (uses channels from neighborInit)
+	go c.neighborEventLoop(neighCh, neighDone)
 
 	// Step 7: Start tap loops
 	go c.tapReadLoop()

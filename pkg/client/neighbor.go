@@ -16,21 +16,36 @@ import (
 	pb "vxlan-controller/proto"
 )
 
-// neighborWatchLoop monitors netlink neighbor events and sends incremental updates.
-func (c *Client) neighborWatchLoop() {
+// neighborInit subscribes to netlink neighbor events and performs the initial
+// FDB dump. Must complete before any TCP connections start so that sendloops
+// always read populated LocalMACs. Returns the event channel and done channel
+// for use by neighborEventLoop.
+func (c *Client) neighborInit() (chan netlink.NeighUpdate, chan struct{}) {
 	// Subscribe FIRST, then dump — so no events are lost between dump and subscribe.
 	// Duplicate events from the overlap are harmless (addLocalRoute is idempotent).
 	neighCh := make(chan netlink.NeighUpdate)
 	done := make(chan struct{})
-	defer close(done)
 
 	if err := netlink.NeighSubscribe(neighCh, done); err != nil {
 		vlog.Errorf("[Client] netlink neighbor subscribe error: %v", err)
-		return
+		close(done)
+		return nil, done
 	}
 
 	// Initial full dump (events arriving during dump queue in neighCh)
-	c.dumpLocalState()
+	c.initLocalMACs()
+
+	return neighCh, done
+}
+
+// neighborEventLoop processes netlink neighbor events. Must be called after
+// neighborInit and run as a goroutine.
+func (c *Client) neighborEventLoop(neighCh chan netlink.NeighUpdate, done chan struct{}) {
+	defer close(done)
+
+	if neighCh == nil {
+		return
+	}
 
 	for {
 		select {
@@ -166,7 +181,7 @@ func (c *Client) isRelevantNeighEvent(neigh netlink.Neigh) bool {
 	return false
 }
 
-func (c *Client) dumpLocalState() {
+func (c *Client) initLocalMACs() {
 	bridge, err := netlink.LinkByName(c.Config.BridgeName)
 	if err != nil {
 		vlog.Errorf("[Client] bridge %s not found: %v", c.Config.BridgeName, err)
@@ -216,21 +231,11 @@ func (c *Client) dumpLocalState() {
 
 	vlog.Infof("[Client] local state dump: found %d local routes (%d after filter)", total, len(routes))
 
-	// macMu.WLock: set LocalMACs atomically.
+	// Set LocalMACs. Called during init before any TCP connections or
+	// sendloops start, so no queue push needed.
 	c.macMu.Lock()
 	c.LocalMACs = routes
 	c.macMu.Unlock()
-
-	// Push empty triggers to wake all sendloops.
-	// Sendloops with MACsSynced=false will do full sync.
-	c.mu.Lock()
-	for _, cc := range c.Controllers {
-		select {
-		case cc.SendQueue <- ClientQueueItem{}:
-		default:
-		}
-	}
-	c.mu.Unlock()
 }
 
 func (c *Client) entryBelongsToBridge(n netlink.Neigh, bridgeIndex int) bool {
