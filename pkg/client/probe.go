@@ -372,6 +372,12 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 
 		for af := range c.Config.AFSettings {
 			afCfg := c.Config.AFSettings[af]
+
+			// Skip AFs that the peer doesn't have
+			if _, peerHasAF := peer.info.Endpoints[af]; !peerHasAF {
+				continue
+			}
+
 			key := latKey{clientID: peer.clientID, af: af}
 
 			latMu.Lock()
@@ -379,16 +385,12 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			sentCount := sent[key]
 			latMu.Unlock()
 
-			if sentCount == 0 {
-				continue
-			}
-
 			result := &pb.AFProbeResult{
 				Priority:       int32(afCfg.Priority),
 				AdditionalCost: afCfg.AdditionalCost,
 			}
 
-			if len(lats) == 0 {
+			if sentCount == 0 || len(lats) == 0 {
 				result.LatencyMean = types.INF_LATENCY
 				result.PacketLoss = 1.0
 			} else {
@@ -420,16 +422,18 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	for _, peer := range peers {
 		lpr := &LocalProbeResult{AFResults: make(map[types.AFName]*LocalAFProbeResult)}
 		for af := range c.Config.AFSettings {
+			// Skip AFs that the peer doesn't have
+			if _, peerHasAF := peer.info.Endpoints[af]; !peerHasAF {
+				continue
+			}
+
 			key := latKey{clientID: peer.clientID, af: af}
 			latMu.Lock()
 			lats := latencies[key]
 			sentCount := sent[key]
 			latMu.Unlock()
-			if sentCount == 0 {
-				continue
-			}
 			afr := &LocalAFProbeResult{}
-			if len(lats) == 0 {
+			if sentCount == 0 || len(lats) == 0 {
 				afr.LatencyMean = types.INF_LATENCY
 				afr.PacketLoss = 1.0
 			} else {

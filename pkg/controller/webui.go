@@ -84,7 +84,7 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 	for src, dsts := range c.State.BestPaths {
 		row := webui.LatencyRowJSON{Src: src.Hex()}
 		for dst, bp := range dsts {
-			var latency float64
+			latency := types.INF_LATENCY
 			if bp.Raw != nil {
 				latency = bp.Raw.Mean
 			}
