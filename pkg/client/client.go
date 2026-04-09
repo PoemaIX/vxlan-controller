@@ -41,7 +41,10 @@ type Client struct {
 	VxlanDevs map[types.AFName]*VxlanDev
 	TapFD     *os.File
 
-	// Local state
+	// Local MAC state — protected by macMu (RWMutex), independent of c.mu.
+	// Write (neighbor events): WLock → update → push to all queues → WUnlock
+	// GetFullState (sendloop): RLock → encode snapshot → RUnlock
+	macMu     sync.RWMutex
 	LocalMACs []types.Type2Route
 
 	// FDB state
@@ -717,9 +720,12 @@ func (c *Client) handleControllerState(ctrlID types.ControllerID, af types.AFNam
 	default:
 	}
 
-	// Connection ready — snapshot LocalMACs and push full update to this controller.
-	// Atomic under c.mu: no incremental can slip between snapshot and mark.
-	c.triggerFullMACs(cc)
+	// Connection ready — push empty trigger to wake sendloop.
+	// Sendloop sees MACsSynced=false → does full sync.
+	select {
+	case cc.SendQueue <- ClientQueueItem{}:
+	default:
+	}
 
 	c.mu.Unlock()
 
@@ -865,35 +871,56 @@ func (c *Client) filterRouteTable(rt []*types.RouteTableEntry) []*types.RouteTab
 }
 
 // controllerSendLoop dequeues items and sends to the controller.
-// It is a pure sender — callers are responsible for encoding the correct
-// data (full or incremental) into the queue item.
+// When synced=false: snapshot LocalMACs (RLock) → mark synced=true → send full state.
+// Setting synced=true before send ensures incrementals arriving during the send
+// are queued rather than dropped — the full state already covers them.
 func (c *Client) controllerSendLoop(cc *ControllerConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
 		if cc.ActiveAF == "" {
 			c.mu.Unlock()
-			continue // discard — wait for controller to pick AF
+			continue // not connected — discard
 		}
 		afc := cc.AFConns[cc.ActiveAF]
 		if afc == nil {
 			c.mu.Unlock()
 			continue
 		}
+		synced := cc.MACsSynced
 		c.mu.Unlock()
 
-		// Send State
+		if !synced {
+			// 1. Snapshot LocalMACs (RLock blocks neighbor writes)
+			fullMsg := c.getFullMACsEncoded()
+
+			// 2. Mark synced BEFORE send — incrementals arriving now
+			//    will queue normally instead of being dropped.
+			c.mu.Lock()
+			cc.MACsSynced = true
+			c.mu.Unlock()
+
+			// 3. Send full state
+			if fullMsg != nil {
+				msgType := protocol.MsgType(fullMsg[0])
+				payload := fullMsg[1:]
+				if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
+					// Write failed — connection is broken, disconnect will reset synced.
+					continue
+				}
+			}
+			// Discard the dequeued item — full state supersedes it.
+			continue
+		}
+
+		// Synced — send item as-is (incremental).
 		if item.State != nil {
 			msgType := protocol.MsgType(item.State[0])
 			payload := item.State[1:]
 			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
-				// Connection is likely broken; handleClientDisconnect
-				// will set MACsSynced=false and reconnect will trigger
-				// a new full sync via handleControllerState.
 				continue
 			}
 		}
 
-		// Send Message
 		if item.Message != nil {
 			msgType := protocol.MsgType(item.Message[0])
 			payload := item.Message[1:]
@@ -923,32 +950,16 @@ func (c *Client) handleClientDisconnect(cc *ControllerConn, af types.AFName, afc
 	// Non-activeAF disconnect: just cleared the handle, nothing else.
 }
 
-// triggerFullMACs snapshots LocalMACs, encodes a full MACUpdate, and pushes
-// it to this controller's send queue. On success it marks MACsSynced=true
-// atomically (under the same lock acquisition that reads LocalMACs), so no
-// incremental update can slip between the snapshot and the mark.
-// Must be called with c.mu held.
-func (c *Client) triggerFullMACs(cc *ControllerConn) {
-	if cc.ActiveAF == "" {
-		return
-	}
-	msg := c.getFullMACsEncoded()
-	if msg == nil {
-		return
-	}
-	select {
-	case cc.SendQueue <- ClientQueueItem{State: msg}:
-		cc.MACsSynced = true
-	default:
-		cc.MACsSynced = false
-		vlog.Warnf("[Client] send queue full for controller %s, deferring full MAC sync",
-			cc.ControllerID.Hex()[:8])
-	}
+// getFullMACsEncoded snapshots LocalMACs under macMu.RLock and returns
+// an encoded full MACUpdate message. Blocks concurrent writes to LocalMACs.
+func (c *Client) getFullMACsEncoded() []byte {
+	c.macMu.RLock()
+	defer c.macMu.RUnlock()
+	return c.getFullMACsEncodedLocked()
 }
 
-// getFullMACsEncoded returns encoded full MACUpdate from LocalMACs.
-// Must be called with c.mu held.
-func (c *Client) getFullMACsEncoded() []byte {
+// getFullMACsEncodedLocked encodes LocalMACs. Caller must hold macMu (R or W).
+func (c *Client) getFullMACsEncodedLocked() []byte {
 	update := &pb.MACUpdate{IsFull: true}
 	for _, r := range c.LocalMACs {
 		rt := &pb.Type2Route{Mac: r.MAC}

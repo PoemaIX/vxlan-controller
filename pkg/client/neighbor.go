@@ -92,8 +92,11 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 		return
 	}
 
-	// Update local state
-	c.mu.Lock()
+	// macMu.WLock: update local state + push to all queues atomically.
+	// This ensures no concurrent RLock (sendloop full sync) can read
+	// a state that doesn't include this update.
+	c.macMu.Lock()
+
 	localRT := types.Type2Route{MAC: rt.Mac}
 	if ipStr != "" {
 		localRT.IP, _ = netip.ParseAddr(ipStr)
@@ -103,36 +106,44 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 	} else {
 		c.LocalMACs = addLocalRoute(c.LocalMACs, localRT)
 	}
-	c.mu.Unlock()
 
-	// Send incremental update via sendqueue
+	// Encode incremental update
 	macUpdate := &pb.MACUpdate{
 		IsFull: false,
 		Routes: []*pb.Type2Route{rt},
 	}
 	data, err := proto.Marshal(macUpdate)
 	if err != nil {
+		c.macMu.Unlock()
 		vlog.Errorf("[Client] marshal MACUpdate error: %v", err)
 		return
 	}
-
 	msg := clientEncodeMessage(protocol.MsgMACUpdate, data)
+
+	// Push to ALL controller queues unconditionally.
+	// Queue full → disconnect that controller (reconnect will resync).
 	c.mu.Lock()
+	var disconnectAFCs []*ClientAFConn
 	for _, cc := range c.Controllers {
-		if !cc.MACsSynced {
-			// Not synced — send full snapshot instead of incremental.
-			c.triggerFullMACs(cc)
-			continue
-		}
 		select {
 		case cc.SendQueue <- ClientQueueItem{State: msg}:
 		default:
-			// Queue full — incremental lost. Send full to recover.
-			cc.MACsSynced = false
-			c.triggerFullMACs(cc)
+			// Queue full — disconnect active AF to trigger reconnect + full resync.
+			if cc.ActiveAF != "" {
+				if afc, ok := cc.AFConns[cc.ActiveAF]; ok {
+					disconnectAFCs = append(disconnectAFCs, afc)
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
+	c.macMu.Unlock()
+
+	// Close connections outside of locks to avoid deadlock.
+	for _, afc := range disconnectAFCs {
+		vlog.Warnf("[Client] send queue full, disconnecting controller")
+		afc.CloseDone()
+	}
 }
 
 func (c *Client) isRelevantNeighEvent(neigh netlink.Neigh) bool {
@@ -205,13 +216,19 @@ func (c *Client) dumpLocalState() {
 
 	vlog.Infof("[Client] local state dump: found %d local routes (%d after filter)", total, len(routes))
 
-	c.mu.Lock()
+	// macMu.WLock: set LocalMACs atomically.
+	c.macMu.Lock()
 	c.LocalMACs = routes
-	// Push full MACs to all connected controllers.
-	// If a controller connected before this dump completed, it may have
-	// received an empty full update — this corrects it.
+	c.macMu.Unlock()
+
+	// Push empty triggers to wake all sendloops.
+	// Sendloops with MACsSynced=false will do full sync.
+	c.mu.Lock()
 	for _, cc := range c.Controllers {
-		c.triggerFullMACs(cc)
+		select {
+		case cc.SendQueue <- ClientQueueItem{}:
+		default:
+		}
 	}
 	c.mu.Unlock()
 }
