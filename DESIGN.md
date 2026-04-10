@@ -390,7 +390,7 @@ Controller 配置:
         * 普通 slave（VM 的 tap/veth、eth0 等）: 保持 `learning on` — bridge 需要從本地 port 學習 MAC，才能正確將 unicast 送到對的本地設備
     * **Device Configuration**: 使用這個指令創建 vxlan device:
       ```bash
-      ip link add {vxlan_name} type vxlan id {vni} local {bind_addr} ttl 255 dstport {port} srcport {port} {port} nolearning
+      ip link add {vxlan_name} type vxlan id {vni} local {bind_addr} ttl 255 dstport {port} srcport {port} {port} nolearning udp6zerocsumrx
       ip link set {vxlan_name} master {bridge_name}
       ip link set {vxlan_name} type bridge_slave hairpin on learning off neigh_suppress on  # neigh_suppress 視配置決定
       ip link set {vxlan_name} up
