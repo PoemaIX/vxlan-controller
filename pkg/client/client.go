@@ -46,6 +46,7 @@ type Client struct {
 	// GetFullState (sendloop): RLock → encode snapshot → RUnlock
 	macMu     sync.RWMutex
 	LocalMACs []types.Type2Route
+	bridgeMAC net.HardwareAddr // current bridge device MAC, protected by macMu
 
 	// FDB state
 	CurrentFDB map[fdbKey]fdbEntry
@@ -251,7 +252,7 @@ func (c *Client) Run() error {
 
 	// Step 4: Initialize local state (subscribe + dump FDB).
 	// Must complete before TCP connections so sendloops never read empty LocalMACs.
-	neighCh, neighDone := c.neighborInit()
+	neighCh, linkCh, neighDone := c.neighborInit()
 
 	// Start sendloops for all controllers
 	for _, cc := range c.Controllers {
@@ -281,7 +282,7 @@ func (c *Client) Run() error {
 	go c.addrWatchLoop()
 
 	// Step 6: Start neighbor event loop (uses channels from neighborInit)
-	go c.neighborEventLoop(neighCh, neighDone)
+	go c.neighborEventLoop(neighCh, linkCh, neighDone)
 
 	// Step 7: Start tap loops
 	go c.tapReadLoop()

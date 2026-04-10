@@ -16,11 +16,11 @@ import (
 	pb "vxlan-controller/proto"
 )
 
-// neighborInit subscribes to netlink neighbor events and performs the initial
-// FDB dump. Must complete before any TCP connections start so that sendloops
-// always read populated LocalMACs. Returns the event channel and done channel
-// for use by neighborEventLoop.
-func (c *Client) neighborInit() (chan netlink.NeighUpdate, chan struct{}) {
+// neighborInit subscribes to netlink neighbor and link events, and performs the
+// initial FDB dump. Must complete before any TCP connections start so that
+// sendloops always read populated LocalMACs. Returns channels for use by
+// neighborEventLoop.
+func (c *Client) neighborInit() (chan netlink.NeighUpdate, chan netlink.LinkUpdate, chan struct{}) {
 	// Subscribe FIRST, then dump — so no events are lost between dump and subscribe.
 	// Duplicate events from the overlap are harmless (addLocalRoute is idempotent).
 	neighCh := make(chan netlink.NeighUpdate)
@@ -29,18 +29,26 @@ func (c *Client) neighborInit() (chan netlink.NeighUpdate, chan struct{}) {
 	if err := netlink.NeighSubscribe(neighCh, done); err != nil {
 		vlog.Errorf("[Client] netlink neighbor subscribe error: %v", err)
 		close(done)
-		return nil, done
+		return nil, nil, done
+	}
+
+	// Subscribe to link events (for bridge MAC changes)
+	linkCh := make(chan netlink.LinkUpdate)
+	linkDone := make(chan struct{})
+	if err := netlink.LinkSubscribe(linkCh, linkDone); err != nil {
+		vlog.Warnf("[Client] netlink link subscribe error: %v", err)
+		linkCh = nil
 	}
 
 	// Initial full dump (events arriving during dump queue in neighCh)
 	c.initLocalMACs()
 
-	return neighCh, done
+	return neighCh, linkCh, done
 }
 
-// neighborEventLoop processes netlink neighbor events. Must be called after
-// neighborInit and run as a goroutine.
-func (c *Client) neighborEventLoop(neighCh chan netlink.NeighUpdate, done chan struct{}) {
+// neighborEventLoop processes netlink neighbor and link events. Must be called
+// after neighborInit and run as a goroutine.
+func (c *Client) neighborEventLoop(neighCh chan netlink.NeighUpdate, linkCh chan netlink.LinkUpdate, done chan struct{}) {
 	defer close(done)
 
 	if neighCh == nil {
@@ -57,6 +65,14 @@ func (c *Client) neighborEventLoop(neighCh chan netlink.NeighUpdate, done chan s
 				continue
 			}
 			c.handleNeighEvent(update)
+		case update, ok := <-linkCh:
+			if !ok {
+				linkCh = nil // stop selecting on closed channel
+				continue
+			}
+			if update.Attrs().Name == c.Config.BridgeName {
+				c.handleBridgeMACChange(update.Link)
+			}
 		case <-c.ctx.Done():
 			return
 		}
@@ -161,6 +177,66 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 	}
 }
 
+// handleBridgeMACChange detects bridge device MAC changes (e.g. ip link set
+// br0 address xx:xx:xx:xx:xx:xx) and sends incremental MAC updates.
+func (c *Client) handleBridgeMACChange(link netlink.Link) {
+	newMAC := link.Attrs().HardwareAddr
+	if len(newMAC) == 0 || newMAC[0]&0x01 != 0 {
+		return // multicast or empty
+	}
+
+	c.macMu.Lock()
+	oldMAC := c.bridgeMAC
+	if macEqual(oldMAC, newMAC) {
+		c.macMu.Unlock()
+		return
+	}
+
+	vlog.Infof("[Client] bridge MAC changed: %s -> %s", oldMAC, newMAC)
+	c.bridgeMAC = make(net.HardwareAddr, len(newMAC))
+	copy(c.bridgeMAC, newMAC)
+
+	// Build incremental update: delete old, add new
+	var protoRoutes []*pb.Type2Route
+	if len(oldMAC) > 0 {
+		c.LocalMACs = removeLocalRoute(c.LocalMACs, types.Type2Route{MAC: oldMAC})
+		if c.Filters.OutputRoute.FilterRoute(oldMAC.String(), "", true) {
+			protoRoutes = append(protoRoutes, &pb.Type2Route{Mac: oldMAC, IsDelete: true})
+		}
+	}
+	c.LocalMACs = addLocalRoute(c.LocalMACs, types.Type2Route{MAC: newMAC})
+	if c.Filters.OutputRoute.FilterRoute(newMAC.String(), "", false) {
+		protoRoutes = append(protoRoutes, &pb.Type2Route{Mac: newMAC})
+	}
+
+	if len(protoRoutes) == 0 {
+		c.macMu.Unlock()
+		return
+	}
+
+	macUpdate := &pb.MACUpdate{
+		IsFull: false,
+		Routes: protoRoutes,
+	}
+	data, err := proto.Marshal(macUpdate)
+	if err != nil {
+		c.macMu.Unlock()
+		vlog.Errorf("[Client] marshal bridge MAC update error: %v", err)
+		return
+	}
+	msg := clientEncodeMessage(protocol.MsgMACUpdate, data)
+
+	c.mu.Lock()
+	for _, cc := range c.Controllers {
+		select {
+		case cc.SendQueue <- ClientQueueItem{State: msg}:
+		default:
+		}
+	}
+	c.mu.Unlock()
+	c.macMu.Unlock()
+}
+
 func (c *Client) isRelevantNeighEvent(neigh netlink.Neigh) bool {
 	link, err := netlink.LinkByIndex(neigh.LinkIndex)
 	if err != nil {
@@ -195,8 +271,17 @@ func (c *Client) initLocalMACs() {
 		return
 	}
 
+	// Include the bridge device's own MAC — it won't reliably appear in
+	// the FDB dump but represents a reachable L3 endpoint on this node.
+	bridgeHWAddr := bridge.Attrs().HardwareAddr
 	var routes []types.Type2Route
 	seenMACs := make(map[string]struct{})
+	if len(bridgeHWAddr) > 0 && bridgeHWAddr[0]&0x01 == 0 {
+		routes = append(routes, types.Type2Route{MAC: bridgeHWAddr})
+		seenMACs[bridgeHWAddr.String()] = struct{}{}
+		vlog.Debugf("[Client] including bridge MAC %s", bridgeHWAddr)
+	}
+
 	for _, n := range neighs {
 		if !c.entryBelongsToBridge(n, bridgeIndex) {
 			continue
@@ -241,6 +326,7 @@ func (c *Client) initLocalMACs() {
 	// sendloops start, so no queue push needed.
 	c.macMu.Lock()
 	c.LocalMACs = routes
+	c.bridgeMAC = bridgeHWAddr
 	c.macMu.Unlock()
 }
 
