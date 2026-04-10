@@ -196,6 +196,7 @@ func (c *Client) initLocalMACs() {
 	}
 
 	var routes []types.Type2Route
+	seenMACs := make(map[string]struct{})
 	for _, n := range neighs {
 		if !c.entryBelongsToBridge(n, bridgeIndex) {
 			continue
@@ -203,6 +204,11 @@ func (c *Client) initLocalMACs() {
 		if !c.isLocalFDBEntry(n) {
 			continue
 		}
+		macStr := n.HardwareAddr.String()
+		if _, dup := seenMACs[macStr]; dup {
+			continue
+		}
+		seenMACs[macStr] = struct{}{}
 		rt := types.Type2Route{
 			MAC: n.HardwareAddr,
 		}

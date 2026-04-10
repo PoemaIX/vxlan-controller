@@ -310,12 +310,17 @@ type showRouteCLIEntry struct {
 	MAC        string              `json:"mac"`
 	IP         string              `json:"ip,omitempty"`
 	Owners     []showRouteOwnerCLI `json:"owners"`
+	NextHop    string              `json:"nexthop,omitempty"`
+	NextHopIP  string              `json:"nexthop_ip,omitempty"`
+	AF         string              `json:"af,omitempty"`
+	Installed  bool                `json:"installed"`
 	Controller string              `json:"controller,omitempty"`
 }
 
 type showRouteOwnerCLI struct {
 	ClientID   string `json:"client_id"`
 	ClientName string `json:"client_name"`
+	Selected   bool   `json:"selected"`
 }
 
 func vxccliShowRoute(sockPath string, ctrlID string) {
@@ -346,13 +351,17 @@ func vxccliShowRoute(sockPath string, ctrlID string) {
 	})
 
 	for _, r := range result {
+		// Build owner string, marking selected owner with *
 		ownerNames := make([]string, 0, len(r.Owners))
 		for _, o := range r.Owners {
-			if o.ClientName != "" {
-				ownerNames = append(ownerNames, o.ClientName)
-			} else {
-				ownerNames = append(ownerNames, o.ClientID)
+			name := o.ClientName
+			if name == "" {
+				name = o.ClientID
 			}
+			if o.Selected {
+				name = "*" + name
+			}
+			ownerNames = append(ownerNames, name)
 		}
 		sort.Strings(ownerNames)
 
@@ -360,7 +369,24 @@ func vxccliShowRoute(sockPath string, ctrlID string) {
 		if r.IP != "" {
 			ipStr = " " + r.IP
 		}
-		fmt.Printf("%-20s%s  via %s\n", r.MAC, ipStr, joinStrings(ownerNames, ", "))
+
+		// Build nexthop info
+		nhStr := ""
+		if r.NextHop != "" {
+			nhStr = fmt.Sprintf("  nhop=%s(%s) af=%s", r.NextHop, r.NextHopIP, r.AF)
+		}
+
+		// Installed status
+		fdbStr := ""
+		if !r.Installed {
+			if r.NextHop == "" {
+				fdbStr = "  [no route]"
+			} else {
+				fdbStr = "  [not installed]"
+			}
+		}
+
+		fmt.Printf("%-20s%s  via %s%s%s\n", r.MAC, ipStr, joinStrings(ownerNames, ", "), nhStr, fdbStr)
 	}
 }
 

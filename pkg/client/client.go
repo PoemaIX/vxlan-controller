@@ -1260,12 +1260,17 @@ type ShowRouteEntry struct {
 	MAC        string           `json:"mac"`
 	IP         string           `json:"ip,omitempty"`
 	Owners     []showRouteOwner `json:"owners"`
+	NextHop    string           `json:"nexthop,omitempty"`
+	NextHopIP  string           `json:"nexthop_ip,omitempty"`
+	AF         string           `json:"af,omitempty"`
+	Installed  bool             `json:"installed"`
 	Controller string           `json:"controller,omitempty"`
 }
 
 type showRouteOwner struct {
 	ClientID   string `json:"client_id"`
 	ClientName string `json:"client_name"`
+	Selected   bool   `json:"selected"`
 }
 
 type showRouteParams struct {
@@ -1313,6 +1318,8 @@ func (c *Client) apiShowRoute(params json.RawMessage) ([]ShowRouteEntry, error) 
 
 	var result []ShowRouteEntry
 	for _, cv := range views {
+		myRoutes := cv.view.RouteMatrix[c.ClientID]
+
 		for _, entry := range cv.view.RouteTable {
 			re := ShowRouteEntry{
 				MAC:        entry.MAC.String(),
@@ -1321,16 +1328,44 @@ func (c *Client) apiShowRoute(params json.RawMessage) ([]ShowRouteEntry, error) 
 			if entry.IP.IsValid() {
 				re.IP = entry.IP.String()
 			}
+
+			// Select owner using the same logic as reconcileFDB
+			selectedOwner := c.selectRouteOwner(entry, cv.view)
+
 			for cid := range entry.Owners {
 				name := ""
 				if ci, ok := cv.view.Clients[cid]; ok {
 					name = ci.ClientName
 				}
+				isSelected := selectedOwner != nil && cid == *selectedOwner
 				re.Owners = append(re.Owners, showRouteOwner{
 					ClientID:   cid.Hex()[:16],
 					ClientName: name,
+					Selected:   isSelected,
 				})
 			}
+
+			// Resolve nexthop from RouteMatrix
+			if selectedOwner != nil && myRoutes != nil {
+				if routeEntry, ok := myRoutes[*selectedOwner]; ok {
+					// Nexthop name
+					if nhInfo, ok := cv.view.Clients[routeEntry.NextHop]; ok {
+						re.NextHop = nhInfo.ClientName
+						if re.NextHop == "" {
+							re.NextHop = routeEntry.NextHop.Hex()[:16]
+						}
+						if ep, ok := nhInfo.Endpoints[routeEntry.AF]; ok {
+							re.NextHopIP = ep.IP.String()
+						}
+					}
+					re.AF = string(routeEntry.AF)
+				}
+			}
+
+			// Check if actually installed in kernel FDB
+			fKey := fdbKey{MAC: entry.MAC.String()}
+			_, re.Installed = c.CurrentFDB[fKey]
+
 			result = append(result, re)
 		}
 	}

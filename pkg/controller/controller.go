@@ -524,7 +524,12 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 	}
 
 	if update.IsFull {
-		// Full replacement
+		// Full replacement (deduplicate by MAC+IP)
+		type routeKey struct {
+			mac string
+			ip  netip.Addr
+		}
+		seen := make(map[routeKey]struct{})
 		var routes []types.Type2Route
 		for _, r := range update.Routes {
 			rt := types.Type2Route{MAC: r.Mac}
@@ -532,6 +537,10 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 				rt.IP = netip.AddrFrom4([4]byte(r.Ip))
 			} else if len(r.Ip) == 16 {
 				rt.IP = netip.AddrFrom16([16]byte(r.Ip))
+			}
+			// Normalize unspecified IPs
+			if rt.IP.IsValid() && rt.IP.IsUnspecified() {
+				rt.IP = netip.Addr{}
 			}
 			// Filter inbound route
 			if cc.Filters != nil {
@@ -543,6 +552,11 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 					continue
 				}
 			}
+			key := routeKey{mac: rt.MAC.String(), ip: rt.IP}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
 			routes = append(routes, rt)
 		}
 		ci.Routes = routes
@@ -555,6 +569,10 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 				rt.IP = netip.AddrFrom4([4]byte(r.Ip))
 			} else if len(r.Ip) == 16 {
 				rt.IP = netip.AddrFrom16([16]byte(r.Ip))
+			}
+			// Normalize unspecified IPs
+			if rt.IP.IsValid() && rt.IP.IsUnspecified() {
+				rt.IP = netip.Addr{}
 			}
 			// Filter inbound route
 			if cc.Filters != nil {
@@ -988,12 +1006,18 @@ func (c *Controller) updateRouteTable() {
 
 	for clientID, ci := range c.State.Clients {
 		for _, route := range ci.Routes {
-			key := rtKey{mac: route.MAC.String(), ip: route.IP}
+			// Normalize IP: treat invalid Addr (Addr{}) and 0.0.0.0 as the same
+			// to avoid duplicate entries from different zero representations.
+			ip := route.IP
+			if ip.IsValid() && ip.IsUnspecified() {
+				ip = netip.Addr{}
+			}
+			key := rtKey{mac: route.MAC.String(), ip: ip}
 			entry, ok := entries[key]
 			if !ok {
 				entry = &types.RouteTableEntry{
 					MAC:    route.MAC,
-					IP:     route.IP,
+					IP:     ip,
 					Owners: make(map[types.ClientID]time.Time),
 				}
 				entries[key] = entry

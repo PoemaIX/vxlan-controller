@@ -84,39 +84,47 @@ func (c *Client) reconcileFDB() {
 	desiredFDB := make(map[fdbKey]fdbEntry)
 
 	for _, rtEntry := range view.RouteTable {
+		macStr := rtEntry.MAC.String()
+
 		// Select owner: the one with lowest latency in LatencyMatrix
 		ownerClient := c.selectRouteOwner(rtEntry, view)
 		if ownerClient == nil {
+			vlog.Verbosef("[Client] FDB skip %s: no reachable owner", macStr)
 			continue
 		}
 
 		// Lookup route from me to the owner
 		myRoutes, ok := view.RouteMatrix[c.ClientID]
 		if !ok {
+			vlog.Verbosef("[Client] FDB skip %s: my ID %s not in RouteMatrix", macStr, c.ClientID.Hex()[:8])
 			continue
 		}
 		routeEntry, ok := myRoutes[*ownerClient]
 		if !ok {
-			continue // unreachable
+			vlog.Verbosef("[Client] FDB skip %s: no route to owner %s", macStr, nameOf(*ownerClient))
+			continue
 		}
 
 		// Find the nexthop's endpoint for the chosen AF
 		nextHopInfo, ok := view.Clients[routeEntry.NextHop]
 		if !ok {
+			vlog.Verbosef("[Client] FDB skip %s: nexthop %s not in Clients", macStr, nameOf(routeEntry.NextHop))
 			continue
 		}
 		ep, ok := nextHopInfo.Endpoints[routeEntry.AF]
 		if !ok {
+			vlog.Verbosef("[Client] FDB skip %s: nexthop %s has no endpoint for AF %s", macStr, nameOf(routeEntry.NextHop), routeEntry.AF)
 			continue
 		}
 
 		// Find the vxlan device for this AF
 		vxlanDev, ok := c.VxlanDevs[routeEntry.AF]
 		if !ok {
+			vlog.Verbosef("[Client] FDB skip %s: no local vxlan device for AF %s", macStr, routeEntry.AF)
 			continue
 		}
 
-		key := fdbKey{MAC: rtEntry.MAC.String()}
+		key := fdbKey{MAC: macStr}
 		desiredFDB[key] = fdbEntry{
 			DevName: vxlanDev.Name,
 			DstIP:   ep.IP.AsSlice(),
