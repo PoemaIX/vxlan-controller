@@ -115,6 +115,7 @@ func (c *Client) createVxlanDevice(vd *VxlanDev, afCfg *config.ClientAFConfig) e
 		"ttl", "255",
 		"dstport", fmt.Sprintf("%d", afCfg.VxlanDstPort),
 		"nolearning",
+		"udp6zerocsumrx",
 	}
 	if afCfg.VxlanSrcPortStart > 0 && afCfg.VxlanSrcPortEnd > 0 {
 		args = append(args, "srcport",
