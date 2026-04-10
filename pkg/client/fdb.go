@@ -131,6 +131,17 @@ func (c *Client) reconcileFDB() {
 		}
 	}
 
+	// Build set of locally-owned MACs so we never install remote FDB entries
+	// for addresses that belong to this node (e.g. the bridge device MAC).
+	// Without this, a remote site announcing the same MAC would overwrite the
+	// bridge's native local FDB entry, and withdrawal would then delete it.
+	c.macMu.RLock()
+	localMACSet := make(map[string]struct{}, len(c.LocalMACs))
+	for _, lm := range c.LocalMACs {
+		localMACSet[net.HardwareAddr(lm.MAC).String()] = struct{}{}
+	}
+	c.macMu.RUnlock()
+
 	// Also add FDB entries for routes from RouteMatrix that have direct MAC entries
 	// from remote clients
 	for clientID, ci := range view.Clients {
@@ -162,6 +173,9 @@ func (c *Client) reconcileFDB() {
 
 		for _, route := range ci.Routes {
 			key := fdbKey{MAC: route.MAC.String()}
+			if _, local := localMACSet[key.MAC]; local {
+				continue // never overwrite locally-owned MACs
+			}
 			if _, exists := desiredFDB[key]; !exists {
 				desiredFDB[key] = fdbEntry{
 					DevName: vxlanDev.Name,
