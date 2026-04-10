@@ -145,13 +145,21 @@ func ComputeBestPathsStatic(
 			bestCost := INF_LATENCY
 
 			for af, cost := range afs {
-				// Check reachability from probe data
-				if li, ok := latencyMatrix[src]; ok {
-					if info, ok := li[dst]; ok {
-						if al, ok := info.AFs[af]; ok && al.PacketLoss >= 1.0 {
-							continue // unreachable
-						}
-					}
+				// Check reachability from probe data.
+				// Require probe data to confirm the AF is actually usable —
+				// if there's no probe data at all (e.g. destination has no
+				// endpoint for this AF), treat as unreachable.
+				li, srcOK := latencyMatrix[src]
+				if !srcOK {
+					continue // no probe data from source
+				}
+				info, dstOK := li[dst]
+				if !dstOK {
+					continue // no probe data for this pair
+				}
+				al, afOK := info.AFs[af]
+				if !afOK || al.PacketLoss >= 1.0 {
+					continue // no probe data for this AF, or unreachable
 				}
 				if cost < bestCost {
 					bestCost = cost
