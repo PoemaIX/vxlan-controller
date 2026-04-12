@@ -11,6 +11,7 @@ import (
 	"vxlan-controller/pkg/vlog"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // VxlanDev represents a VXLAN device.
@@ -78,7 +79,94 @@ func (c *Client) initDevices() error {
 	}
 	c.TapFD = tapFD
 
+	// Step 6: Flush bridge FDB on every configured vxlan device (enabled or
+	// not). Enabled AFs were just recreated above so this is a no-op for
+	// them; the real purpose is to drop stale entries on disabled AFs whose
+	// device persists from a previous run — without this, isLocalFDBEntry
+	// would treat those entries as local MACs and announce them upstream.
+	c.flushVxlanFDB()
+
 	return nil
+}
+
+// flushDeviceFDB removes every bridge FDB entry on a single link by name. The
+// expectedType (e.g. "vxlan", "tun") is checked defensively so a name collision
+// with an unrelated link the user owns won't cause us to wipe its FDB. Pass an
+// empty string to skip the type check.
+func (c *Client) flushDeviceFDB(name, expectedType string) {
+	if name == "" {
+		return
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return
+	}
+	if expectedType != "" && link.Type() != expectedType {
+		vlog.Warnf("[Client] flush %s: type=%s (expected %s), skipping", name, link.Type(), expectedType)
+		return
+	}
+	linkIdx := link.Attrs().Index
+	neighs, err := netlink.NeighList(linkIdx, unix.AF_BRIDGE)
+	if err != nil {
+		vlog.Warnf("[Client] flush %s: NeighList: %v", name, err)
+		return
+	}
+	removed := 0
+	for i := range neighs {
+		n := neighs[i]
+		if n.LinkIndex != linkIdx {
+			continue
+		}
+		if err := netlink.NeighDel(&n); err == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		vlog.Infof("[Client] flushed %d FDB entries on %s", removed, name)
+	}
+}
+
+// flushVxlanFDB clears bridge FDB on every vxlan device named in the config
+// (enabled or not). For enabled AFs the device was just recreated above so this
+// is a no-op; the real purpose is to drop stale entries on disabled AFs whose
+// device persists from a previous run.
+func (c *Client) flushVxlanFDB() {
+	for _, afCfg := range c.Config.AFSettings {
+		c.flushDeviceFDB(afCfg.VxlanName, "vxlan")
+	}
+}
+
+// deleteManagedDevices removes every device this client currently manages
+// (enabled vxlans + tap-inject). Called from Stop() — symmetric counterpart to
+// createVxlanDevice / createTapInject. Disabled-AF vxlans are intentionally
+// left alone (the user may keep them around for receive-only use).
+func (c *Client) deleteManagedDevices() {
+	for _, vd := range c.VxlanDevs {
+		c.deleteDeviceByName(vd.Name, "vxlan")
+	}
+	c.deleteDeviceByName(tapDeviceName, "")
+}
+
+// deleteDeviceByName looks up a link and LinkDels it. The expectedType check
+// is defensive against name collision with an unrelated link the user owns.
+// Pass an empty string to skip the type check.
+func (c *Client) deleteDeviceByName(name, expectedType string) {
+	if name == "" {
+		return
+	}
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return
+	}
+	if expectedType != "" && link.Type() != expectedType {
+		vlog.Warnf("[Client] delete %s: type=%s (expected %s), skipping", name, link.Type(), expectedType)
+		return
+	}
+	if err := netlink.LinkDel(link); err != nil {
+		vlog.Warnf("[Client] delete %s: %v", name, err)
+		return
+	}
+	vlog.Infof("[Client] removed device %s", name)
 }
 
 func (c *Client) ensureBridge() error {

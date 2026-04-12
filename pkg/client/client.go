@@ -326,6 +326,10 @@ func (c *Client) Stop() {
 	// Clean up FDB entries
 	c.cleanupFDB()
 
+	// Remove client-owned devices (enabled vxlans + tap-inject).
+	// Disabled-AF vxlans are left alone — user may keep them for other uses.
+	c.deleteManagedDevices()
+
 	// Clean up nftables
 	if c.Config.ClampMSSToMTU {
 		c.cleanupNftables()
