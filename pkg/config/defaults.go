@@ -156,4 +156,7 @@ var DefaultControllerConfig = ControllerConfigFile{
 			ClientName: "node-1",
 		},
 	},
+	WebUI: &WebUIConfigFile{
+		Title: "<b>VXLAN</b> Controller",
+	},
 }

@@ -37,6 +37,8 @@ type AutogenConfig struct {
 
 type AutogenWebUI struct {
 	BindAddr string                    `yaml:"bind_addr"`
+	Title    string                    `yaml:"title"`
+	URL      string                    `yaml:"url"`
 	Nodes    map[string]*WebUINodeFile `yaml:"nodes"`
 }
 
@@ -216,6 +218,8 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 		}
 		cfg.WebUI = &WebUIConfigFile{
 			BindAddr: bindAddr,
+			Title:    ag.WebUI.Title,
+			URL:      ag.WebUI.URL,
 		}
 		if len(ag.WebUI.Nodes) > 0 {
 			cfg.WebUI.Nodes = make(map[string]*WebUINodeFile, len(ag.WebUI.Nodes))

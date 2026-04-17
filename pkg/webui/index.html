@@ -77,7 +77,10 @@ body::after {
   display: flex;
   align-items: center;
   gap: 10px;
+  text-decoration: none;
+  color: inherit;
 }
+a.header-left:hover h1 { color: var(--accent); }
 .header-logo {
   width: 6px;
   height: 20px;
@@ -88,14 +91,28 @@ body::after {
 .header h1 {
   font-family: var(--sans);
   font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: 0.5px;
-}
-.header h1 span {
-  color: var(--text2);
   font-weight: 400;
+  color: var(--text2);
+  letter-spacing: 0.5px;
+  transition: color 0.15s;
 }
+.header h1 b {
+  font-weight: 700;
+  color: var(--text);
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.header-github {
+  display: flex;
+  align-items: center;
+  color: var(--text2);
+  transition: color 0.15s;
+}
+.header-github:hover { color: var(--text); }
+.header-github svg { display: block; }
 .status-badge {
   display: flex;
   align-items: center;
@@ -450,14 +467,21 @@ tr:hover td { background: rgba(59,158,255,0.03); }
 <body>
 
 <div class="header">
-  <div class="header-left">
+  <div class="header-left" id="header-left">
     <div class="header-logo"></div>
-    <h1>VXLAN <span>Controller</span></h1>
+    <h1 id="header-title"><b>VXLAN</b> Controller</h1>
   </div>
-  <div class="status-badge">
-    <div class="status-dot" id="ws-dot"></div>
-    <span id="ws-status">connecting</span>
-    <span id="site-count"></span>
+  <div class="header-right">
+    <div class="status-badge">
+      <div class="status-dot" id="ws-dot"></div>
+      <span id="ws-status">connecting</span>
+      <span id="site-count"></span>
+    </div>
+    <a class="header-github" href="https://github.com/PoemaIX/vxlan-controller" target="_blank" rel="noopener noreferrer" title="GitHub">
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+      </svg>
+    </a>
   </div>
 </div>
 
@@ -657,12 +681,12 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     return 'lat-bad';
   }
 
-  function getLatency(srcId, dstId) {
+  function getLatencyEntry(srcId, dstId) {
     if (!state?.latency_matrix) return null;
     for (const row of state.latency_matrix) {
       if (row.src === srcId) {
         for (const e of (row.entries || [])) {
-          if (e.dst === dstId) return e.latency;
+          if (e.dst === dstId) return e;
         }
       }
     }
@@ -670,10 +694,40 @@ tr:hover td { background: rgba(59,158,255,0.03); }
   }
 
   // --- Render ---
+  function renderHeader() {
+    const titleEl = document.getElementById('header-title');
+    const leftEl = document.getElementById('header-left');
+    const title = state?.config?.title;
+    if (title) titleEl.innerHTML = title;
+    const url = state?.config?.url;
+    const isAnchor = leftEl.tagName === 'A';
+    if (url) {
+      if (!isAnchor) {
+        const a = document.createElement('a');
+        a.id = 'header-left';
+        a.className = 'header-left';
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        while (leftEl.firstChild) a.appendChild(leftEl.firstChild);
+        leftEl.parentNode.replaceChild(a, leftEl);
+        a.href = url;
+      } else if (leftEl.getAttribute('href') !== url) {
+        leftEl.setAttribute('href', url);
+      }
+    } else if (isAnchor) {
+      const d = document.createElement('div');
+      d.id = 'header-left';
+      d.className = 'header-left';
+      while (leftEl.firstChild) d.appendChild(leftEl.firstChild);
+      leftEl.parentNode.replaceChild(d, leftEl);
+    }
+  }
+
   function render() {
     if (!state) return;
     const online = state.clients.filter(c => c.online).length;
     document.getElementById('site-count').textContent = online + '/' + state.clients.length + ' sites';
+    renderHeader();
     renderTopology();
     renderRouteTable();
     renderLatencyMatrix();
@@ -727,10 +781,14 @@ tr:hover td { background: rgba(59,158,255,0.03); }
           const key = sorted.join('-');
           if (!linkSet.has(key) && nodeMap[sorted[0]] && nodeMap[sorted[1]]) {
             linkSet.add(key);
+            const fwd = getLatencyEntry(sorted[0], sorted[1]);
+            const rev = getLatencyEntry(sorted[1], sorted[0]);
             links.push({
               src: nodeMap[sorted[0]], dst: nodeMap[sorted[1]], af: e.af,
-              latFwd: getLatency(sorted[0], sorted[1]),
-              latRev: getLatency(sorted[1], sorted[0]),
+              latFwd: fwd ? fwd.latency : null,
+              latRev: rev ? rev.latency : null,
+              afFwd: fwd ? fwd.af : '',
+              afRev: rev ? rev.af : '',
             });
           }
         });
@@ -788,14 +846,16 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       // Always show both directions as normal
       if (fwdOk) {
         const isSPTDir = fwdInSPT;
-        const txt = l.latFwd.toFixed(1) + ' ms';
+        const afPart = l.afFwd ? l.afFwd + ' ' : '';
+        const txt = afPart + l.latFwd.toFixed(1) + ' ms';
         const tw = txt.length * 5.2 + 8;
         html += '<rect class="topo-link-label-bg" x="'+(x1+ox-tw/2)+'" y="'+(y1+oy-7)+'" width="'+tw+'" height="14"/>';
         html += '<text class="topo-link-label" style="fill:'+(isSPTDir?'var(--green)':'#fff')+'" x="'+(x1+ox)+'" y="'+(y1+oy)+'">'+txt+'</text>';
       }
       if (revOk) {
         const isSPTDir = revInSPT;
-        const txt = l.latRev.toFixed(1) + ' ms';
+        const afPart = l.afRev ? l.afRev + ' ' : '';
+        const txt = afPart + l.latRev.toFixed(1) + ' ms';
         const tw = txt.length * 5.2 + 8;
         html += '<rect class="topo-link-label-bg" x="'+(x2+ox-tw/2)+'" y="'+(y2+oy-7)+'" width="'+tw+'" height="14"/>';
         html += '<text class="topo-link-label" style="fill:'+(isSPTDir?'var(--green)':'#fff')+'" x="'+(x2+ox)+'" y="'+(y2+oy)+'">'+txt+'</text>';
@@ -909,7 +969,8 @@ tr:hover td { background: rgba(59,158,255,0.03); }
         } else {
           const e = latMap[src.id+'|'+dst.id];
           if (e && e.latency != null && e.latency < 1e15) {
-            h += '<td class="lat-cell '+latClass(e.latency)+'"><span>'+e.latency.toFixed(1)+'</span></td>';
+            const afPart = e.af ? '<span style="color:var(--text3);margin-right:4px">'+e.af+'</span>' : '';
+            h += '<td class="lat-cell '+latClass(e.latency)+'">'+afPart+'<span>'+e.latency.toFixed(1)+'</span></td>';
           } else {
             h += '<td class="lat-cell" style="color:var(--text3)">?</td>';
           }

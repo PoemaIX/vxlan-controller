@@ -17,6 +17,8 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 
 	// Config (static)
 	if c.Config.WebUI != nil {
+		snap.Config.Title = c.Config.WebUI.Title
+		snap.Config.URL = c.Config.WebUI.URL
 		snap.Config.MacAliases = c.Config.WebUI.MacAliases
 		if c.Config.WebUI.Nodes != nil {
 			snap.Config.Nodes = make(map[string]webui.UINodeJSON, len(c.Config.WebUI.Nodes))

@@ -96,6 +96,8 @@ type RejectDetailJSON struct {
 }
 
 type UIConfigJSON struct {
+	Title      string                 `json:"title"`
+	URL        string                 `json:"url,omitempty"`
 	MacAliases map[string]string      `json:"mac_aliases"`
 	Nodes      map[string]UINodeJSON  `json:"nodes"`
 }

@@ -34,6 +34,8 @@ type ControllerConfigFile struct {
 
 type WebUIConfigFile struct {
 	BindAddr   string                       `yaml:"bind_addr"`
+	Title      string                       `yaml:"title"`
+	URL        string                       `yaml:"url"`
 	MacAliases map[string]string            `yaml:"mac_aliases"`
 	Nodes      map[string]*WebUINodeFile    `yaml:"nodes"`
 }
@@ -90,6 +92,8 @@ type ControllerConfig struct {
 
 type WebUIConfig struct {
 	BindAddr   string
+	Title      string
+	URL        string
 	MacAliases map[string]string
 	Nodes      map[string]*WebUINode
 }
@@ -130,6 +134,11 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 	raw := DefaultControllerConfig
 	raw.AFSettings = nil      // clear so user must specify
 	raw.AllowedClients = nil  // clear so user must specify
+	// Deep-clone pointer defaults so yaml.Unmarshal doesn't mutate the global.
+	if raw.WebUI != nil {
+		w := *raw.WebUI
+		raw.WebUI = &w
+	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
@@ -265,6 +274,8 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 	if raw.WebUI != nil && raw.WebUI.BindAddr != "" {
 		wui := &WebUIConfig{
 			BindAddr:   raw.WebUI.BindAddr,
+			Title:      raw.WebUI.Title,
+			URL:        raw.WebUI.URL,
 			MacAliases: raw.WebUI.MacAliases,
 		}
 		if len(raw.WebUI.Nodes) > 0 {
