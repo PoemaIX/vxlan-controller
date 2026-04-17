@@ -64,12 +64,10 @@ func (c *Client) probeListenLoop(af types.AFName) {
 
 		n, remoteAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			select {
-			case <-c.ctx.Done():
-				return
-			default:
-				continue
-			}
+			// UDP listener has no recoverable transient errors; any error
+			// means the socket was closed (Stop / updateBindAddr) or is
+			// otherwise unusable. Exit so the goroutine doesn't spin.
+			return
 		}
 
 		data := make([]byte, n)

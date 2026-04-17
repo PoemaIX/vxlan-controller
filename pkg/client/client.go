@@ -609,12 +609,7 @@ func (c *Client) commUDPReadLoop(ctrlID types.ControllerID, af types.AFName, con
 
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				continue
-			}
+			return
 		}
 
 		data := make([]byte, n)
