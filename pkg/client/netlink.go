@@ -136,37 +136,14 @@ func (c *Client) flushVxlanFDB() {
 	}
 }
 
-// deleteManagedDevices removes every device this client currently manages
-// (enabled vxlans + tap-inject). Called from Stop() — symmetric counterpart to
-// createVxlanDevice / createTapInject. Disabled-AF vxlans are intentionally
-// left alone (the user may keep them around for receive-only use).
-func (c *Client) deleteManagedDevices() {
+// flushManagedFDB clears bridge FDB on every device this client currently
+// manages (enabled vxlans + tap-inject). Called from Stop() so we don't leave
+// stale entries behind for the next run to misclassify.
+func (c *Client) flushManagedFDB() {
 	for _, vd := range c.VxlanDevs {
-		c.deleteDeviceByName(vd.Name, "vxlan")
+		c.flushDeviceFDB(vd.Name, "vxlan")
 	}
-	c.deleteDeviceByName(tapDeviceName, "")
-}
-
-// deleteDeviceByName looks up a link and LinkDels it. The expectedType check
-// is defensive against name collision with an unrelated link the user owns.
-// Pass an empty string to skip the type check.
-func (c *Client) deleteDeviceByName(name, expectedType string) {
-	if name == "" {
-		return
-	}
-	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return
-	}
-	if expectedType != "" && link.Type() != expectedType {
-		vlog.Warnf("[Client] delete %s: type=%s (expected %s), skipping", name, link.Type(), expectedType)
-		return
-	}
-	if err := netlink.LinkDel(link); err != nil {
-		vlog.Warnf("[Client] delete %s: %v", name, err)
-		return
-	}
-	vlog.Infof("[Client] removed device %s", name)
+	c.flushDeviceFDB(tapDeviceName, "")
 }
 
 func (c *Client) ensureBridge() error {

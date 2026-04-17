@@ -33,7 +33,9 @@ func (c *Controller) pushDelta(update *pb.ControllerStateUpdate) {
 
 		msg := defaultMsg
 
-		// Per-client route filtering for RouteTableUpdate
+		// Per-client route filtering for RouteTableUpdate. Carry the source
+		// fields through so the sync_check daemon on the source client can
+		// still observe its own echo even after filtering.
 		if isRouteTable && cc.Filters != nil {
 			filtered := c.filterRouteTableForClient(rtUpdate.RouteTableUpdate.Entries, cc)
 			if len(filtered) != len(rtUpdate.RouteTableUpdate.Entries) {
@@ -43,6 +45,9 @@ func (c *Controller) pushDelta(update *pb.ControllerStateUpdate) {
 							Entries: filtered,
 						},
 					},
+					SourceClientId:  update.SourceClientId,
+					SourceSessionId: update.SourceSessionId,
+					SourceSeqid:     update.SourceSeqid,
 				}
 				if d, err := proto.Marshal(filteredUpdate); err == nil {
 					msg = encodeMessage(protocol.MsgControllerStateUpdate, d)

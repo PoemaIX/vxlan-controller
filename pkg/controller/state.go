@@ -16,8 +16,8 @@ import (
 
 // DNS resolution cache for endpoint overrides (DDNS support).
 var (
-	dnsCache   = make(map[string]dnsCacheEntry)
-	dnsCacheMu sync.Mutex
+	dnsCache    = make(map[string]dnsCacheEntry)
+	dnsCacheMu  sync.Mutex
 	dnsCacheTTL = 60 * time.Second
 )
 
@@ -81,6 +81,12 @@ type QueueItem struct {
 }
 
 // ClientConn represents the Controller's connection state with a single Client.
+//
+// LastClientSessionID/LastClientSeqid track the most recent (session_id, seqid)
+// the controller received in a MACUpdate from this client. They are echoed back
+// in every ControllerStateUpdate broadcast triggered by this client's MAC
+// update, so the source client can confirm round-trip completion in its
+// syncCheckLoop. Both fields are protected by Controller.mu.
 type ClientConn struct {
 	ClientID  types.ClientID
 	AFConns   map[types.AFName]*AFConn
@@ -88,6 +94,9 @@ type ClientConn struct {
 	Synced    bool
 	SendQueue chan QueueItem
 	Filters   *filter.FilterSet
+
+	LastClientSessionID string
+	LastClientSeqid     uint64
 }
 
 // AFConn represents a single AF TCP connection to a client.
@@ -118,10 +127,10 @@ func newControllerState() *ControllerState {
 // overrideFn returns per-AF endpoint overrides for a given client (nil if none).
 func (cs *ControllerState) Snapshot(controllerID types.ClientID, overrideFn func(types.ClientID) map[types.AFName]string) *pb.ControllerState {
 	state := &pb.ControllerState{
-		ClientCount:              uint32(len(cs.Clients)),
+		ClientCount:               uint32(len(cs.Clients)),
 		LastClientChangeTimestamp: cs.LastClientChange.UnixNano(),
-		Clients:                  make(map[string]*pb.ClientInfoProto),
-		ControllerId:             controllerID[:],
+		Clients:                   make(map[string]*pb.ClientInfoProto),
+		ControllerId:              controllerID[:],
 	}
 
 	for id, ci := range cs.Clients {
