@@ -523,11 +523,13 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 		return
 	}
 
-	// Record the latest (session_id, seqid) from this client so we can echo
-	// it back in the broadcast triggered by this update. A full sync resets
-	// the source's seqid to 0, so we always trust the incoming values.
+	// Record the latest seqid from this client so we can echo it back.
+	// Only update session_id on a full sync (seqid=0) — this ensures the
+	// controller acknowledges the full baseline before any incrementals.
 	if update.SessionId != "" {
-		cc.LastClientSessionID = update.SessionId
+		if update.IsFull {
+			cc.LastClientSessionID = update.SessionId
+		}
 		cc.LastClientSeqid = update.Seqid
 	}
 
