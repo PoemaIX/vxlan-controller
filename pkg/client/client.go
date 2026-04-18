@@ -2,16 +2,18 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"vxlan-controller/pkg/vlog"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
+	"vxlan-controller/pkg/vlog"
 
 	"google.golang.org/protobuf/proto"
 
@@ -64,14 +66,14 @@ type Client struct {
 	addrEngines map[types.AFName]*filter.AddrSelectEngine
 
 	// Probe
-	probeConns         map[types.AFName]*net.UDPConn
-	probeSessions      *crypto.SessionManager
-	pendingHandshakes  map[types.ClientID]*crypto.HandshakeState
+	probeConns          map[types.AFName]*net.UDPConn
+	probeSessions       *crypto.SessionManager
+	pendingHandshakes   map[types.ClientID]*crypto.HandshakeState
 	pendingHandshakesMu sync.Mutex
-	probeResultsMu     sync.Mutex
-	probeResponseChs   map[uint64]chan probeResponseData
-	lastProbeTime      time.Time
-	lastProbeResults   map[types.ClientID]*LocalProbeResult
+	probeResultsMu      sync.Mutex
+	probeResponseChs    map[uint64]chan probeResponseData
+	lastProbeTime       time.Time
+	lastProbeResults    map[types.ClientID]*LocalProbeResult
 
 	// Channels
 	fdbNotifyCh       chan struct{}
@@ -85,12 +87,30 @@ type Client struct {
 }
 
 // ClientQueueItem is the sendqueue element for client→controller messages.
+//
+// Exactly one of MACDelta / Message / Trigger is meaningful per item:
+//   - MACDelta: incremental MAC delta routes; sendloop stamps the per-cc
+//     session_id and seqid before encoding and sending.
+//   - Message: a pre-encoded non-MAC message (e.g. probe results).
+//   - Trigger: empty wakeup; combined with MACsSynced=false this causes
+//     the sendloop to emit a fresh full sync.
 type ClientQueueItem struct {
-	State   []byte // encoded MAC update (full or inc), nil if none
-	Message []byte // encoded non-state message (probe results, etc.), nil if none
+	MACDelta []*pb.Type2Route
+	Message  []byte
+	Trigger  bool
 }
 
 // ControllerConn represents Client's connection to a single Controller.
+//
+// Session/seqid fields (under syncMu) implement the per-controller
+// session+seqid round-trip used by syncCheckLoop:
+//   - localSessionID/localSeqid: regenerated whenever the sendloop emits a
+//     full MACUpdate (seqid resets to 0); incremented per outbound incremental.
+//   - remoteSessionID/remoteSeqid: latest values echoed back by the controller
+//     in a ControllerStateUpdate whose source_client_id == self.
+//
+// Lock ordering: c.macMu (R or W) > c.mu > cc.syncMu. Always acquire syncMu
+// last to avoid deadlock with the neighbor write path.
 type ControllerConn struct {
 	ControllerID types.ControllerID
 	AFConns      map[types.AFName]*ClientAFConn
@@ -99,6 +119,12 @@ type ControllerConn struct {
 	Synced       bool
 	MACsSynced   bool
 	SendQueue    chan ClientQueueItem
+
+	syncMu          sync.Mutex
+	localSessionID  string
+	localSeqid      uint64
+	remoteSessionID string
+	remoteSeqid     uint64
 }
 
 // ClientAFConn represents a single AF connection to a controller.
@@ -143,11 +169,11 @@ type LocalAFProbeResult struct {
 
 // ClientInfoView is the Client's view of a ClientInfo from the Controller.
 type ClientInfoView struct {
-	ClientID  types.ClientID
+	ClientID   types.ClientID
 	ClientName string
-	Endpoints map[types.AFName]*types.Endpoint
-	LastSeen  time.Time
-	Routes    []types.Type2Route
+	Endpoints  map[types.AFName]*types.Endpoint
+	LastSeen   time.Time
+	Routes     []types.Type2Route
 }
 
 const clientSendQueueSize = 256
@@ -297,6 +323,10 @@ func (c *Client) Run() error {
 	// Step 8c: Start mcast stats reporter
 	go c.mcastStatsReportLoop()
 
+	// Step 8d: Start sync check daemon (verifies controller view of self
+	// routes via session_id+seqid round-trip; re-syncs on mismatch).
+	go c.syncCheckLoop()
+
 	// Step 9: Authority selection with init_timeout
 	go func() {
 		timer := time.NewTimer(c.Config.InitTimeout)
@@ -326,9 +356,10 @@ func (c *Client) Stop() {
 	// Clean up FDB entries
 	c.cleanupFDB()
 
-	// Remove client-owned devices (enabled vxlans + tap-inject).
-	// Disabled-AF vxlans are left alone — user may keep them for other uses.
-	c.deleteManagedDevices()
+	// Flush bridge FDB on all client-managed devices so the next run won't
+	// misclassify stale entries as local. Devices themselves are left alone
+	// (the user may keep disabled-AF vxlans around for other uses).
+	c.flushManagedFDB()
 
 	// Clean up nftables
 	if c.Config.ClampMSSToMTU {
@@ -781,6 +812,20 @@ func (c *Client) handleControllerStateUpdate(ctrlID types.ControllerID, payload 
 		clientsChanged = true
 	}
 
+	// If this update echoes back a MAC update we sent, record the
+	// (session_id, seqid) so syncCheckLoop can confirm round-trip completion.
+	if len(update.SourceClientId) == len(c.ClientID) &&
+		update.SourceSessionId != "" {
+		var srcID types.ClientID
+		copy(srcID[:], update.SourceClientId)
+		if srcID == c.ClientID {
+			cc.syncMu.Lock()
+			cc.remoteSessionID = update.SourceSessionId
+			cc.remoteSeqid = update.SourceSeqid
+			cc.syncMu.Unlock()
+		}
+	}
+
 	c.mu.Unlock()
 
 	// Notify FDB reconciler
@@ -875,9 +920,11 @@ func (c *Client) filterRouteTable(rt []*types.RouteTableEntry) []*types.RouteTab
 }
 
 // controllerSendLoop dequeues items and sends to the controller.
-// When synced=false: snapshot LocalMACs (RLock) → mark synced=true → send full state.
-// Setting synced=true before send ensures incrementals arriving during the send
-// are queued rather than dropped — the full state already covers them.
+// When synced=false: snapshot LocalMACs (RLock) → mark synced=true → emit a
+// fresh full sync stamped with a new session_id and seqid=0. When synced=true:
+// stamp the dequeued MACDelta with the next per-cc seqid and send.
+// Setting synced=true before send ensures incrementals arriving during the
+// send are queued rather than dropped — the full state already covers them.
 func (c *Client) controllerSendLoop(cc *ControllerConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
@@ -894,33 +941,48 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 		c.mu.Unlock()
 
 		if !synced {
-			// 1. Snapshot LocalMACs (RLock blocks neighbor writes)
-			fullMsg := c.getFullMACsEncoded()
+			// Snapshot LocalMACs and stamp with a fresh session_id under
+			// macMu.RLock + cc.syncMu so any neighbor event that fires
+			// concurrently sees the new sessionID before encoding its
+			// incremental.
+			fullMsg := c.getFullMACsEncodedAndStamp(cc)
 
-			// 2. Mark synced BEFORE send — incrementals arriving now
-			//    will queue normally instead of being dropped.
 			c.mu.Lock()
 			cc.MACsSynced = true
 			c.mu.Unlock()
 
-			// 3. Send full state
 			if fullMsg != nil {
 				msgType := protocol.MsgType(fullMsg[0])
 				payload := fullMsg[1:]
 				if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
-					// Write failed — connection is broken, disconnect will reset synced.
+					// Write failed — connection is broken; disconnect will reset synced
+					// and the next reconnect will regenerate the session.
 					continue
 				}
 			}
-			// Discard the dequeued item — full state supersedes it.
 			continue
 		}
 
-		// Synced — send item as-is (incremental).
-		if item.State != nil {
-			msgType := protocol.MsgType(item.State[0])
-			payload := item.State[1:]
-			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
+		// Synced — handle MAC delta (stamp + encode + send).
+		if item.MACDelta != nil {
+			cc.syncMu.Lock()
+			cc.localSeqid++
+			sessID := cc.localSessionID
+			seqID := cc.localSeqid
+			cc.syncMu.Unlock()
+
+			update := &pb.MACUpdate{
+				IsFull:    false,
+				Routes:    item.MACDelta,
+				SessionId: sessID,
+				Seqid:     seqID,
+			}
+			data, err := proto.Marshal(update)
+			if err != nil {
+				vlog.Errorf("[Client] marshal incremental MACUpdate error: %v", err)
+				continue
+			}
+			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, protocol.MsgMACUpdate, data); err != nil {
 				continue
 			}
 		}
@@ -954,17 +1016,28 @@ func (c *Client) handleClientDisconnect(cc *ControllerConn, af types.AFName, afc
 	// Non-activeAF disconnect: just cleared the handle, nothing else.
 }
 
-// getFullMACsEncoded snapshots LocalMACs under macMu.RLock and returns
-// an encoded full MACUpdate message. Blocks concurrent writes to LocalMACs.
-func (c *Client) getFullMACsEncoded() []byte {
+// getFullMACsEncodedAndStamp snapshots LocalMACs under macMu.RLock, generates
+// a fresh session_id on the given ControllerConn (resetting localSeqid to 0),
+// and returns an encoded full MACUpdate stamped with that session.
+//
+// macMu and cc.syncMu are both held during the snapshot+stamp so any
+// concurrent neighbor event (which acquires macMu.Lock then cc.syncMu.Lock)
+// will see the new session before it stamps its incremental.
+func (c *Client) getFullMACsEncodedAndStamp(cc *ControllerConn) []byte {
 	c.macMu.RLock()
 	defer c.macMu.RUnlock()
-	return c.getFullMACsEncodedLocked()
-}
 
-// getFullMACsEncodedLocked encodes LocalMACs. Caller must hold macMu (R or W).
-func (c *Client) getFullMACsEncodedLocked() []byte {
-	update := &pb.MACUpdate{IsFull: true}
+	cc.syncMu.Lock()
+	cc.localSessionID = newSessionID()
+	cc.localSeqid = 0
+	sessID := cc.localSessionID
+	cc.syncMu.Unlock()
+
+	update := &pb.MACUpdate{
+		IsFull:    true,
+		SessionId: sessID,
+		Seqid:     0,
+	}
 	for _, r := range c.LocalMACs {
 		rt := &pb.Type2Route{Mac: r.MAC}
 		if r.IP.IsValid() {
@@ -978,6 +1051,18 @@ func (c *Client) getFullMACsEncodedLocked() []byte {
 		return nil
 	}
 	return clientEncodeMessage(protocol.MsgMACUpdate, data)
+}
+
+// newSessionID returns a 16-hex-char random session identifier.
+func newSessionID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fall back to time-based id; collisions are still extremely unlikely
+		// given the per-cc scope, and a degenerate id only weakens the daemon
+		// check, not correctness.
+		return fmt.Sprintf("t%016x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // clientEncodeMessage prepends the msg_type byte to payload.

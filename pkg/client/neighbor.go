@@ -1,14 +1,11 @@
 package client
 
 import (
-	"vxlan-controller/pkg/vlog"
 	"net"
 	"net/netip"
 
-	"google.golang.org/protobuf/proto"
-
-	"vxlan-controller/pkg/protocol"
 	"vxlan-controller/pkg/types"
+	"vxlan-controller/pkg/vlog"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -138,28 +135,16 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 		c.LocalMACs = addLocalRoute(c.LocalMACs, localRT)
 	}
 
-	// Encode incremental update
-	macUpdate := &pb.MACUpdate{
-		IsFull: false,
-		Routes: []*pb.Type2Route{rt},
-	}
-	data, err := proto.Marshal(macUpdate)
-	if err != nil {
-		c.macMu.Unlock()
-		vlog.Errorf("[Client] marshal MACUpdate error: %v", err)
-		return
-	}
-	msg := clientEncodeMessage(protocol.MsgMACUpdate, data)
-
-	// Push to ALL controller queues unconditionally.
-	// Queue full → disconnect that controller (reconnect will resync).
+	// Push the unstamped delta to ALL controller queues; the per-cc sendloop
+	// will assign session_id+seqid at dequeue time. Queue full → disconnect
+	// that controller (reconnect will resync).
+	delta := []*pb.Type2Route{rt}
 	c.mu.Lock()
 	var disconnectAFCs []*ClientAFConn
 	for _, cc := range c.Controllers {
 		select {
-		case cc.SendQueue <- ClientQueueItem{State: msg}:
+		case cc.SendQueue <- ClientQueueItem{MACDelta: delta}:
 		default:
-			// Queue full — disconnect active AF to trigger reconnect + full resync.
 			if cc.ActiveAF != "" {
 				if afc, ok := cc.AFConns[cc.ActiveAF]; ok {
 					disconnectAFCs = append(disconnectAFCs, afc)
@@ -214,27 +199,28 @@ func (c *Client) handleBridgeMACChange(link netlink.Link) {
 		return
 	}
 
-	macUpdate := &pb.MACUpdate{
-		IsFull: false,
-		Routes: protoRoutes,
-	}
-	data, err := proto.Marshal(macUpdate)
-	if err != nil {
-		c.macMu.Unlock()
-		vlog.Errorf("[Client] marshal bridge MAC update error: %v", err)
-		return
-	}
-	msg := clientEncodeMessage(protocol.MsgMACUpdate, data)
-
 	c.mu.Lock()
+	var disconnectAFCs []*ClientAFConn
 	for _, cc := range c.Controllers {
 		select {
-		case cc.SendQueue <- ClientQueueItem{State: msg}:
+		case cc.SendQueue <- ClientQueueItem{MACDelta: protoRoutes}:
 		default:
+			// Symmetric to handleNeighEvent: queue full means we'd lose a
+			// MAC delta, so force a reconnect+resync rather than silent drop.
+			if cc.ActiveAF != "" {
+				if afc, ok := cc.AFConns[cc.ActiveAF]; ok {
+					disconnectAFCs = append(disconnectAFCs, afc)
+				}
+			}
 		}
 	}
 	c.mu.Unlock()
 	c.macMu.Unlock()
+
+	for _, afc := range disconnectAFCs {
+		vlog.Warnf("[Client] send queue full on bridge MAC change, disconnecting controller")
+		afc.CloseDone()
+	}
 }
 
 func (c *Client) isRelevantNeighEvent(neigh netlink.Neigh) bool {

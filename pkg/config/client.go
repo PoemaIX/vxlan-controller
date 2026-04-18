@@ -15,41 +15,43 @@ import (
 )
 
 type ClientConfigFile struct {
-	PrivateKey        string                          `yaml:"private_key"`
-	PublicKey         string                          `yaml:"public_key,omitempty"`
-	BridgeName        string                          `yaml:"bridge_name"`
-	ClampMSSToMTU      bool                            `yaml:"clamp_mss_to_mtu"`
-	ClampMSSTable      string                          `yaml:"clamp_mss_table"`
-	NeighSuppress     bool                            `yaml:"neigh_suppress"`
-	VxlanFirewall      bool                            `yaml:"vxlan_firewall"`
-	VxlanFirewallTable string                          `yaml:"vxlan_firewall_table"`
-	AFSettings        map[string]*ClientAFConfigFile   `yaml:"address_families"`
-	InitTimeout       int                             `yaml:"init_timeout"`
-	StatsIntervalS    int                             `yaml:"stats_interval_s"`
-	NTPServers        []string                        `yaml:"ntp_servers"`
-	NTPPeriodH        int                             `yaml:"ntp_period_h"`
-	NTPRTTThresholdMs int                             `yaml:"ntp_rtt_threshold_ms"`
-	Filters           *filter.FilterConfigFile         `yaml:"filters"`
-	LogLevel          string                          `yaml:"log_level"`
-	APISocket         string                          `yaml:"api_socket"`
+	PrivateKey         string                         `yaml:"private_key"`
+	PublicKey          string                         `yaml:"public_key,omitempty"`
+	BridgeName         string                         `yaml:"bridge_name"`
+	ClampMSSToMTU      bool                           `yaml:"clamp_mss_to_mtu"`
+	ClampMSSTable      string                         `yaml:"clamp_mss_table"`
+	NeighSuppress      bool                           `yaml:"neigh_suppress"`
+	VxlanFirewall      bool                           `yaml:"vxlan_firewall"`
+	VxlanFirewallTable string                         `yaml:"vxlan_firewall_table"`
+	AFSettings         map[string]*ClientAFConfigFile `yaml:"address_families"`
+	InitTimeout        int                            `yaml:"init_timeout"`
+	StatsIntervalS     int                            `yaml:"stats_interval_s"`
+	NTPServers         []string                       `yaml:"ntp_servers"`
+	NTPPeriodH         int                            `yaml:"ntp_period_h"`
+	NTPRTTThresholdMs  int                            `yaml:"ntp_rtt_threshold_ms"`
+	Filters            *filter.FilterConfigFile       `yaml:"filters"`
+	LogLevel           string                         `yaml:"log_level"`
+	APISocket          string                         `yaml:"api_socket"`
+	SyncCheckIntervalS int                            `yaml:"sync_check_interval_s"`
+	SyncCheckMaxDelay  uint64                         `yaml:"sync_check_max_delay"`
 }
 
 type ClientAFConfigFile struct {
-	Enable               bool                            `yaml:"enable"`
-	BindAddr             string                          `yaml:"bind_addr"`
-	AutoIPInterface  string                          `yaml:"autoip_interface"`
-	AddrSelect           string                          `yaml:"addr_select"`
-	ProbePort            uint16                          `yaml:"probe_port"`
-	CommunicationPort    uint16                          `yaml:"communication_port"`
-	VxlanName            string                          `yaml:"vxlan_name"`
-	VxlanVNI             uint32                          `yaml:"vxlan_vni"`
-	VxlanMTU             int                             `yaml:"vxlan_mtu"`
-	VxlanDstPort         uint16                          `yaml:"vxlan_dst_port"`
-	VxlanSrcPortStart    uint16                          `yaml:"vxlan_src_port_start"`
-	VxlanSrcPortEnd      uint16                          `yaml:"vxlan_src_port_end"`
-	Priority             int                             `yaml:"priority"`
-	AdditionalCost       float64                         `yaml:"additional_cost"`
-	Controllers          []ControllerEndpointFile        `yaml:"controllers"`
+	Enable            bool                     `yaml:"enable"`
+	BindAddr          string                   `yaml:"bind_addr"`
+	AutoIPInterface   string                   `yaml:"autoip_interface"`
+	AddrSelect        string                   `yaml:"addr_select"`
+	ProbePort         uint16                   `yaml:"probe_port"`
+	CommunicationPort uint16                   `yaml:"communication_port"`
+	VxlanName         string                   `yaml:"vxlan_name"`
+	VxlanVNI          uint32                   `yaml:"vxlan_vni"`
+	VxlanMTU          int                      `yaml:"vxlan_mtu"`
+	VxlanDstPort      uint16                   `yaml:"vxlan_dst_port"`
+	VxlanSrcPortStart uint16                   `yaml:"vxlan_src_port_start"`
+	VxlanSrcPortEnd   uint16                   `yaml:"vxlan_src_port_end"`
+	Priority          int                      `yaml:"priority"`
+	AdditionalCost    float64                  `yaml:"additional_cost"`
+	Controllers       []ControllerEndpointFile `yaml:"controllers"`
 }
 
 type ControllerEndpointFile struct {
@@ -59,41 +61,43 @@ type ControllerEndpointFile struct {
 
 // ClientConfig is the parsed client configuration.
 type ClientConfig struct {
-	PrivateKey       [32]byte
-	BridgeName       string
-	ClampMSSToMTU    bool
-	ClampMSSTable    string
-	NeighSuppress    bool
+	PrivateKey         [32]byte
+	BridgeName         string
+	ClampMSSToMTU      bool
+	ClampMSSTable      string
+	NeighSuppress      bool
 	VxlanFirewall      bool
 	VxlanFirewallTable string
-	AFSettings       map[types.AFName]*ClientAFConfig
-	InitTimeout      time.Duration
-	StatsInterval    time.Duration
-	NTPServers       []string
-	NTPPeriod        time.Duration
-	NTPRTTThreshold  time.Duration
-	Filters          *filter.FilterConfig
-	LogLevel         string
-	APISocket        string
+	AFSettings         map[types.AFName]*ClientAFConfig
+	InitTimeout        time.Duration
+	StatsInterval      time.Duration
+	NTPServers         []string
+	NTPPeriod          time.Duration
+	NTPRTTThreshold    time.Duration
+	Filters            *filter.FilterConfig
+	LogLevel           string
+	APISocket          string
+	SyncCheckInterval  time.Duration
+	SyncCheckMaxDelay  uint64
 }
 
 type ClientAFConfig struct {
-	Name                types.AFName
-	Enable              bool
-	BindAddr            netip.Addr
-	AutoIPInterface string
-	AddrSelectScript    string // resolved Lua code for addr selection
-	ProbePort           uint16
-	CommunicationPort   uint16
-	VxlanName           string
-	VxlanVNI            uint32
-	VxlanMTU            int
-	VxlanDstPort        uint16
-	VxlanSrcPortStart   uint16
-	VxlanSrcPortEnd     uint16
-	Priority            int
-	AdditionalCost      float64
-	Controllers         []ControllerEndpoint
+	Name              types.AFName
+	Enable            bool
+	BindAddr          netip.Addr
+	AutoIPInterface   string
+	AddrSelectScript  string // resolved Lua code for addr selection
+	ProbePort         uint16
+	CommunicationPort uint16
+	VxlanName         string
+	VxlanVNI          uint32
+	VxlanMTU          int
+	VxlanDstPort      uint16
+	VxlanSrcPortStart uint16
+	VxlanSrcPortEnd   uint16
+	Priority          int
+	AdditionalCost    float64
+	Controllers       []ControllerEndpoint
 }
 
 type ControllerEndpoint struct {
@@ -130,6 +134,12 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		Filters:            filter.ParseFilterConfigFile(raw.Filters, configDir),
 		LogLevel:           raw.LogLevel,
 		APISocket:          raw.APISocket,
+		SyncCheckInterval:  time.Duration(raw.SyncCheckIntervalS) * time.Second,
+		SyncCheckMaxDelay:  raw.SyncCheckMaxDelay,
+	}
+
+	if cfg.SyncCheckMaxDelay == 0 {
+		cfg.SyncCheckMaxDelay = 10
 	}
 
 	// Parse private key

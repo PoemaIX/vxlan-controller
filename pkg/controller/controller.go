@@ -73,7 +73,7 @@ type Controller struct {
 	addrEngines map[types.AFName]*filter.AddrSelectEngine
 
 	// Cost mode: "probe" or "static"
-	CostMode       string
+	CostMode        string
 	staticCostsByID map[types.ClientID]map[types.ClientID]map[types.AFName]float64
 }
 
@@ -97,12 +97,12 @@ func New(cfg *config.ControllerConfig) *Controller {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Controller{
-		Config:       cfg,
-		PrivateKey:   cfg.PrivateKey,
-		ControllerID: pubKey,
-		State:        newControllerState(),
-		afListeners:  make(map[types.AFName]*AFListener),
-		clients:      make(map[types.ClientID]*ClientConn),
+		Config:           cfg,
+		PrivateKey:       cfg.PrivateKey,
+		ControllerID:     pubKey,
+		State:            newControllerState(),
+		afListeners:      make(map[types.AFName]*AFListener),
+		clients:          make(map[types.ClientID]*ClientConn),
 		udpSessions:      crypto.NewSessionManager(),
 		udpAddrs:         make(map[udpAddrKey]*net.UDPAddr),
 		clientMcastStats: make(map[types.ClientID]*ClientMcastStats),
@@ -523,6 +523,16 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 		return
 	}
 
+	// Record the latest seqid from this client so we can echo it back.
+	// Only update session_id on a full sync (seqid=0) — this ensures the
+	// controller acknowledges the full baseline before any incrementals.
+	if update.SessionId != "" {
+		if update.IsFull {
+			cc.LastClientSessionID = update.SessionId
+		}
+		cc.LastClientSeqid = update.Seqid
+	}
+
 	if update.IsFull {
 		// Full replacement (deduplicate by MAC+IP)
 		type routeKey struct {
@@ -596,13 +606,17 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 	// Update RouteTable
 	c.updateRouteTable()
 
-	// Push RouteTable update
+	// Push RouteTable update, stamped with the source client's (session_id,
+	// seqid) so the source can confirm round-trip completion via syncCheckLoop.
 	c.pushDelta(&pb.ControllerStateUpdate{
 		Update: &pb.ControllerStateUpdate_RouteTableUpdate{
 			RouteTableUpdate: &pb.RouteTableUpdateProto{
 				Entries: routeTableToProto(c.State.RouteTable),
 			},
 		},
+		SourceClientId:  cc.ClientID[:],
+		SourceSessionId: cc.LastClientSessionID,
+		SourceSeqid:     cc.LastClientSeqid,
 	})
 }
 
