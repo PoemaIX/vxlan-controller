@@ -1266,16 +1266,17 @@ func (x *ProbeResultEntry) GetDebouncedAfResults() map[string]*AFProbeResult {
 }
 
 type AFProbeResult struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	LatencyMean    float64                `protobuf:"fixed64,1,opt,name=latency_mean,json=latencyMean,proto3" json:"latency_mean,omitempty"`
-	LatencyStd     float64                `protobuf:"fixed64,2,opt,name=latency_std,json=latencyStd,proto3" json:"latency_std,omitempty"`
-	PacketLoss     float64                `protobuf:"fixed64,3,opt,name=packet_loss,json=packetLoss,proto3" json:"packet_loss,omitempty"`
-	Priority       int32                  `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
-	AdditionalCost float64                `protobuf:"fixed64,5,opt,name=additional_cost,json=additionalCost,proto3" json:"additional_cost,omitempty"` // cost of transiting through this node via this AF
-	SwitchCost     float64                `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`             // 0 for preferred AF, >0 for others (hysteresis)
-	Cost           float64                `protobuf:"fixed64,7,opt,name=cost,proto3" json:"cost,omitempty"`                                           // final routing cost computed by client
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	LatencyMean   float64                `protobuf:"fixed64,1,opt,name=latency_mean,json=latencyMean,proto3" json:"latency_mean,omitempty"`
+	LatencyStd    float64                `protobuf:"fixed64,2,opt,name=latency_std,json=latencyStd,proto3" json:"latency_std,omitempty"`
+	PacketLoss    float64                `protobuf:"fixed64,3,opt,name=packet_loss,json=packetLoss,proto3" json:"packet_loss,omitempty"`
+	Priority      int32                  `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
+	ForwardCost   float64                `protobuf:"fixed64,5,opt,name=forward_cost,json=forwardCost,proto3" json:"forward_cost,omitempty"` // cost of transiting through this node via this AF
+	SwitchCost    float64                `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`    // 0 for preferred AF, >0 for others (hysteresis)
+	FinalCost     float64                `protobuf:"fixed64,7,opt,name=final_cost,json=finalCost,proto3" json:"final_cost,omitempty"`       // quality_cost + forward_cost + switch_cost
+	QualityCost   float64                `protobuf:"fixed64,8,opt,name=quality_cost,json=qualityCost,proto3" json:"quality_cost,omitempty"` // abstract quality metric (currently = latency_mean)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AFProbeResult) Reset() {
@@ -1336,9 +1337,9 @@ func (x *AFProbeResult) GetPriority() int32 {
 	return 0
 }
 
-func (x *AFProbeResult) GetAdditionalCost() float64 {
+func (x *AFProbeResult) GetForwardCost() float64 {
 	if x != nil {
-		return x.AdditionalCost
+		return x.ForwardCost
 	}
 	return 0
 }
@@ -1350,9 +1351,16 @@ func (x *AFProbeResult) GetSwitchCost() float64 {
 	return 0
 }
 
-func (x *AFProbeResult) GetCost() float64 {
+func (x *AFProbeResult) GetFinalCost() float64 {
 	if x != nil {
-		return x.Cost
+		return x.FinalCost
+	}
+	return 0
+}
+
+func (x *AFProbeResult) GetQualityCost() float64 {
+	if x != nil {
+		return x.QualityCost
 	}
 	return 0
 }
@@ -1941,18 +1949,20 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\x1ae\n" +
 	"\x17DebouncedAfResultsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
-	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\"\xee\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\"\x96\x02\n" +
 	"\rAFProbeResult\x12!\n" +
 	"\flatency_mean\x18\x01 \x01(\x01R\vlatencyMean\x12\x1f\n" +
 	"\vlatency_std\x18\x02 \x01(\x01R\n" +
 	"latencyStd\x12\x1f\n" +
 	"\vpacket_loss\x18\x03 \x01(\x01R\n" +
 	"packetLoss\x12\x1a\n" +
-	"\bpriority\x18\x04 \x01(\x05R\bpriority\x12'\n" +
-	"\x0fadditional_cost\x18\x05 \x01(\x01R\x0eadditionalCost\x12\x1f\n" +
+	"\bpriority\x18\x04 \x01(\x05R\bpriority\x12!\n" +
+	"\fforward_cost\x18\x05 \x01(\x01R\vforwardCost\x12\x1f\n" +
 	"\vswitch_cost\x18\x06 \x01(\x01R\n" +
-	"switchCost\x12\x12\n" +
-	"\x04cost\x18\a \x01(\x01R\x04cost\"N\n" +
+	"switchCost\x12\x1d\n" +
+	"\n" +
+	"final_cost\x18\a \x01(\x01R\tfinalCost\x12!\n" +
+	"\fquality_cost\x18\b \x01(\x01R\vqualityCost\"N\n" +
 	"\fProbeRequest\x12\x19\n" +
 	"\bprobe_id\x18\x01 \x01(\x04R\aprobeId\x12#\n" +
 	"\rsrc_timestamp\x18\x02 \x01(\x03R\fsrcTimestamp\"t\n" +

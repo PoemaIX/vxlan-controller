@@ -379,8 +379,8 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			latMu.Unlock()
 
 			pbr := &pb.AFProbeResult{
-				Priority:       int32(afCfg.Priority),
-				AdditionalCost: afCfg.AdditionalCost,
+				Priority:    int32(afCfg.Priority),
+				ForwardCost: afCfg.ForwardCost,
 			}
 			afr := &LocalAFProbeResult{}
 
@@ -464,11 +464,11 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		medianEntry := history[reachable[len(reachable)/2].idx]
 
 		dbPb := &pb.AFProbeResult{
-			LatencyMean:    medianEntry.LatencyMean,
-			LatencyStd:     medianEntry.LatencyStd,
-			PacketLoss:     medianEntry.PacketLoss,
-			Priority:       int32(afCfg.Priority),
-			AdditionalCost: afCfg.AdditionalCost,
+			LatencyMean: medianEntry.LatencyMean,
+			LatencyStd:  medianEntry.LatencyStd,
+			PacketLoss:  medianEntry.PacketLoss,
+			Priority:    int32(afCfg.Priority),
+			ForwardCost: afCfg.ForwardCost,
 		}
 		dbLocal := &LocalAFProbeResult{
 			LatencyMean: medianEntry.LatencyMean,
@@ -481,7 +481,7 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	// AF hysteresis + final cost computation
 	switchCost := c.Config.AFSwitchCost
 	for _, peer := range peers {
-		// Step 1: compute base cost (without switch_cost) per AF
+		// Step 1: compute base cost (quality_cost + forward_cost, without switch_cost) per AF
 		type afCostEntry struct {
 			af       types.AFName
 			baseCost float64
@@ -493,16 +493,17 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			if !ok || db.local.PacketLoss >= 1.0 {
 				continue
 			}
-			baseCost := db.local.LatencyMean + db.result.AdditionalCost
+			qualityCost := db.local.LatencyMean
+			baseCost := qualityCost + db.result.ForwardCost
 			reachableAFs = append(reachableAFs, afCostEntry{af: af, baseCost: baseCost})
 		}
 
 		if len(reachableAFs) == 0 {
-			// All unreachable — set cost = INF on debounced results
+			// All unreachable — set final_cost = INF on debounced results
 			for af := range c.Config.AFSettings {
 				key := latKey{clientID: peer.clientID, af: af}
 				if db, ok := debouncedResults[key]; ok {
-					db.result.Cost = types.INF_LATENCY
+					db.result.FinalCost = types.INF_LATENCY
 				}
 			}
 			continue
@@ -526,14 +527,15 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			if !prefOK || prefDB.local.PacketLoss >= 1.0 {
 				c.preferredAF[peer.clientID] = bestAF.af
 			} else {
-				prefBaseCost := prefDB.local.LatencyMean + prefDB.result.AdditionalCost
+				prefQuality := prefDB.local.LatencyMean
+				prefBaseCost := prefQuality + prefDB.result.ForwardCost
 				if prefBaseCost-bestAF.baseCost > switchCost {
 					c.preferredAF[peer.clientID] = bestAF.af
 				}
 			}
 		}
 
-		// Step 4: set switch_cost and compute final cost
+		// Step 4: set quality_cost, switch_cost and compute final_cost
 		pref := c.preferredAF[peer.clientID]
 		for af := range c.Config.AFSettings {
 			key := latKey{clientID: peer.clientID, af: af}
@@ -541,13 +543,15 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			if !ok {
 				continue
 			}
-			baseCost := db.local.LatencyMean + db.result.AdditionalCost
+			qualityCost := db.local.LatencyMean
+			baseCost := qualityCost + db.result.ForwardCost
+			db.result.QualityCost = qualityCost
 			if af == pref {
 				db.result.SwitchCost = 0
-				db.result.Cost = baseCost
+				db.result.FinalCost = baseCost
 			} else {
 				db.result.SwitchCost = switchCost
-				db.result.Cost = baseCost + switchCost
+				db.result.FinalCost = baseCost + switchCost
 			}
 		}
 	}

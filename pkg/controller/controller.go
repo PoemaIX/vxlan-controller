@@ -653,12 +653,14 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		// Raw (latest) results
 		for afStr, afResult := range entry.AfResults {
 			li.RawAFs[types.AFName(afStr)] = &types.AFLatency{
-				Mean:           afResult.LatencyMean,
-				Std:            afResult.LatencyStd,
-				PacketLoss:     afResult.PacketLoss,
-				Priority:       int(afResult.Priority),
-				AdditionalCost: afResult.AdditionalCost,
-				SwitchCost:     afResult.SwitchCost,
+				Mean:        afResult.LatencyMean,
+				Std:         afResult.LatencyStd,
+				PacketLoss:  afResult.PacketLoss,
+				Priority:    int(afResult.Priority),
+				ForwardCost: afResult.ForwardCost,
+				SwitchCost:  afResult.SwitchCost,
+				QualityCost: afResult.QualityCost,
+				FinalCost:   afResult.FinalCost,
 			}
 		}
 
@@ -670,13 +672,14 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		}
 		for afStr, afResult := range debouncedSource {
 			li.AFs[types.AFName(afStr)] = &types.AFLatency{
-				Mean:           afResult.LatencyMean,
-				Std:            afResult.LatencyStd,
-				PacketLoss:     afResult.PacketLoss,
-				Priority:       int(afResult.Priority),
-				AdditionalCost: afResult.AdditionalCost,
-				SwitchCost:     afResult.SwitchCost,
-				Cost:           afResult.Cost,
+				Mean:        afResult.LatencyMean,
+				Std:         afResult.LatencyStd,
+				PacketLoss:  afResult.PacketLoss,
+				Priority:    int(afResult.Priority),
+				ForwardCost: afResult.ForwardCost,
+				SwitchCost:  afResult.SwitchCost,
+				QualityCost: afResult.QualityCost,
+				FinalCost:   afResult.FinalCost,
 			}
 			if afResult.PacketLoss < 1.0 {
 				newReachable = true

@@ -27,7 +27,7 @@ type AutogenConfig struct {
 	VxlanMTU          int     `yaml:"vxlan_mtu"`
 	ProbePort         uint16  `yaml:"probe_port"`
 	Priority          int     `yaml:"priority"`
-	AdditionalCost    float64 `yaml:"additional_cost"`
+	ForwardCost    float64 `yaml:"forward_cost"`
 
 	Nodes       map[string]map[string]AutogenAF `yaml:"nodes"`
 	Controllers []string                        `yaml:"controllers"`
@@ -126,8 +126,8 @@ func Autogen(path string) error {
 	if ag.Priority == 0 {
 		ag.Priority = 10
 	}
-	if ag.AdditionalCost == 0 {
-		ag.AdditionalCost = 20
+	if ag.ForwardCost == 0 {
+		ag.ForwardCost = 20
 	}
 
 	// Validate node references
@@ -288,7 +288,7 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			VxlanSrcPortStart: ag.VxlanSrcPortStart,
 			VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
 			Priority:          ag.Priority,
-			AdditionalCost:    ag.AdditionalCost,
+			ForwardCost:    ag.ForwardCost,
 		}
 		if af.IsAutoIP() {
 			afCfg.AutoIPInterface = af.Bind

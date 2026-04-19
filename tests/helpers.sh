@@ -167,7 +167,7 @@ setup_topology() {
 #   node-4 (dual-stack):   2ms to all (backup transit node)
 #   everything else:       1ms
 #
-# With AdditionalCost=20:
+# With ForwardCost=20:
 #   1→2 direct:  30 + 20 = 50
 #   1→3→2:       (1+20) + (1+20) = 42  ← transit wins by 8ms margin
 #   1→4→2:       (2+20) + (2+20) = 44  ← also beats direct

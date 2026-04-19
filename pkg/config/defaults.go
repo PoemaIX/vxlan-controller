@@ -93,7 +93,7 @@ var DefaultClientConfig = ClientConfigFile{
 			VxlanSrcPortStart: 4789,
 			VxlanSrcPortEnd:   4789,
 			Priority:          10,
-			AdditionalCost:    20,
+			ForwardCost:       20,
 			Controllers: []ControllerEndpointFile{
 				{PubKey: "<base64 controller pubkey from: wg pubkey>", Addr: "192.168.1.1:5000"},
 			},
@@ -110,7 +110,7 @@ var DefaultClientConfig = ClientConfigFile{
 			VxlanSrcPortStart: 4789,
 			VxlanSrcPortEnd:   4789,
 			Priority:          10,
-			AdditionalCost:    20,
+			ForwardCost:       20,
 			Controllers: []ControllerEndpointFile{
 				{PubKey: "<base64 controller pubkey from: wg pubkey>", Addr: "[fd00::1]:5000"},
 			},

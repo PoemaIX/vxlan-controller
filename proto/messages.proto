@@ -142,9 +142,10 @@ message AFProbeResult {
   double latency_std = 2;
   double packet_loss = 3;
   int32 priority = 4;
-  double additional_cost = 5; // cost of transiting through this node via this AF
+  double forward_cost = 5;    // cost of transiting through this node via this AF
   double switch_cost = 6;     // 0 for preferred AF, >0 for others (hysteresis)
-  double cost = 7;            // final routing cost computed by client
+  double final_cost = 7;      // quality_cost + forward_cost + switch_cost
+  double quality_cost = 8;    // abstract quality metric (currently = latency_mean)
 }
 
 // Probe channel messages (serialized, then encrypted)
