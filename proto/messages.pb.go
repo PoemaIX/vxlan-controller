@@ -1272,6 +1272,7 @@ type AFProbeResult struct {
 	PacketLoss     float64                `protobuf:"fixed64,3,opt,name=packet_loss,json=packetLoss,proto3" json:"packet_loss,omitempty"`
 	Priority       int32                  `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
 	AdditionalCost float64                `protobuf:"fixed64,5,opt,name=additional_cost,json=additionalCost,proto3" json:"additional_cost,omitempty"` // cost of transiting through this node via this AF
+	SwitchCost     float64                `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`             // 0 for preferred AF, >0 for others (hysteresis)
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1337,6 +1338,13 @@ func (x *AFProbeResult) GetPriority() int32 {
 func (x *AFProbeResult) GetAdditionalCost() float64 {
 	if x != nil {
 		return x.AdditionalCost
+	}
+	return 0
+}
+
+func (x *AFProbeResult) GetSwitchCost() float64 {
+	if x != nil {
+		return x.SwitchCost
 	}
 	return 0
 }
@@ -1925,7 +1933,7 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\x1ae\n" +
 	"\x17DebouncedAfResultsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
-	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\"\xb9\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\"\xda\x01\n" +
 	"\rAFProbeResult\x12!\n" +
 	"\flatency_mean\x18\x01 \x01(\x01R\vlatencyMean\x12\x1f\n" +
 	"\vlatency_std\x18\x02 \x01(\x01R\n" +
@@ -1933,7 +1941,9 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\vpacket_loss\x18\x03 \x01(\x01R\n" +
 	"packetLoss\x12\x1a\n" +
 	"\bpriority\x18\x04 \x01(\x05R\bpriority\x12'\n" +
-	"\x0fadditional_cost\x18\x05 \x01(\x01R\x0eadditionalCost\"N\n" +
+	"\x0fadditional_cost\x18\x05 \x01(\x01R\x0eadditionalCost\x12\x1f\n" +
+	"\vswitch_cost\x18\x06 \x01(\x01R\n" +
+	"switchCost\"N\n" +
 	"\fProbeRequest\x12\x19\n" +
 	"\bprobe_id\x18\x01 \x01(\x04R\aprobeId\x12#\n" +
 	"\rsrc_timestamp\x18\x02 \x01(\x03R\fsrcTimestamp\"t\n" +

@@ -61,6 +61,7 @@ type AFCostDebounced struct {
 	Mean       float64 `json:"mean"`
 	Std        float64 `json:"std"`
 	PacketLoss float64 `json:"packet_loss"`
+	SwitchCost float64 `json:"switch_cost"`
 	TotalCost  float64 `json:"total_cost"`
 }
 
@@ -108,7 +109,8 @@ func (c *Controller) apiCostGet() (*CostGetResult, error) {
 						Mean:       db.Mean,
 						Std:        db.Std,
 						PacketLoss: db.PacketLoss,
-						TotalCost:  db.Mean + db.AdditionalCost,
+						SwitchCost: db.SwitchCost,
+						TotalCost:  db.Mean + db.AdditionalCost + db.SwitchCost,
 					}
 				}
 				result.Matrix[srcName][dstName][string(af)] = info

@@ -658,6 +658,7 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 				PacketLoss:     afResult.PacketLoss,
 				Priority:       int(afResult.Priority),
 				AdditionalCost: afResult.AdditionalCost,
+				SwitchCost:     afResult.SwitchCost,
 			}
 		}
 
@@ -674,6 +675,7 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 				PacketLoss:     afResult.PacketLoss,
 				Priority:       int(afResult.Priority),
 				AdditionalCost: afResult.AdditionalCost,
+				SwitchCost:     afResult.SwitchCost,
 			}
 			if afResult.PacketLoss < 1.0 {
 				newReachable = true

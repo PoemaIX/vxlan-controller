@@ -76,6 +76,7 @@ type Client struct {
 	lastProbeResults         map[types.ClientID]*LocalProbeResult
 	lastDebouncedResults     map[types.ClientID]*LocalProbeResult
 	probeHistory             map[probeHistoryKey][]*LocalAFProbeResult
+	preferredAF              map[types.ClientID]types.AFName
 
 	// Channels
 	fdbNotifyCh       chan struct{}
@@ -210,6 +211,7 @@ func New(cfg *config.ClientConfig) *Client {
 		pendingHandshakes: make(map[types.ClientID]*crypto.HandshakeState),
 		probeResponseChs:  make(map[uint64]chan probeResponseData),
 		probeHistory:      make(map[probeHistoryKey][]*LocalAFProbeResult),
+		preferredAF:       make(map[types.ClientID]types.AFName),
 		fdbNotifyCh:       make(chan struct{}, 1),
 		fwNotifyCh:        make(chan struct{}, 1),
 		authorityChangeCh: make(chan struct{}, 1),

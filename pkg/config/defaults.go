@@ -76,6 +76,7 @@ var DefaultClientConfig = ClientConfigFile{
 	InitTimeout:        10,
 	StatsIntervalS:     5,
 	ProbeWindowSize:    15,
+	AFSwitchCost:       20,
 	NTPServers:         DefaultNTPServers,
 	NTPPeriodH:         23,
 	NTPRTTThresholdMs:  50,

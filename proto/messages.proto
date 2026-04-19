@@ -143,6 +143,7 @@ message AFProbeResult {
   double packet_loss = 3;
   int32 priority = 4;
   double additional_cost = 5; // cost of transiting through this node via this AF
+  double switch_cost = 6;     // 0 for preferred AF, >0 for others (hysteresis)
 }
 
 // Probe channel messages (serialized, then encrypted)
