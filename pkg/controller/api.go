@@ -105,12 +105,16 @@ func (c *Controller) apiCostGet() (*CostGetResult, error) {
 					TotalCost:      raw.Mean + raw.AdditionalCost,
 				}
 				if db, ok := li.AFs[af]; ok {
+					totalCost := db.Cost
+					if totalCost == 0 {
+						totalCost = db.Mean + db.AdditionalCost + db.SwitchCost
+					}
 					info.Debounced = &AFCostDebounced{
 						Mean:       db.Mean,
 						Std:        db.Std,
 						PacketLoss: db.PacketLoss,
 						SwitchCost: db.SwitchCost,
-						TotalCost:  db.Mean + db.AdditionalCost + db.SwitchCost,
+						TotalCost:  totalCost,
 					}
 				}
 				result.Matrix[srcName][dstName][string(af)] = info

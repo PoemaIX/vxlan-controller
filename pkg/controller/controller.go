@@ -676,6 +676,7 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 				Priority:       int(afResult.Priority),
 				AdditionalCost: afResult.AdditionalCost,
 				SwitchCost:     afResult.SwitchCost,
+				Cost:           afResult.Cost,
 			}
 			if afResult.PacketLoss < 1.0 {
 				newReachable = true
