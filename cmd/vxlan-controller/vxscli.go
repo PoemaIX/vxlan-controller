@@ -81,12 +81,20 @@ func vxscliUsage() {
 }
 
 type afCostInfo struct {
-	Mean           float64 `json:"mean"`
-	Std            float64 `json:"std"`
-	PacketLoss     float64 `json:"packet_loss"`
-	Priority       int     `json:"priority"`
-	AdditionalCost float64 `json:"additional_cost"`
-	TotalCost      float64 `json:"total_cost"`
+	Mean           float64          `json:"mean"`
+	Std            float64          `json:"std"`
+	PacketLoss     float64          `json:"packet_loss"`
+	Priority       int              `json:"priority"`
+	AdditionalCost float64          `json:"additional_cost"`
+	TotalCost      float64          `json:"total_cost"`
+	Debounced      *afCostDebounced `json:"debounced,omitempty"`
+}
+
+type afCostDebounced struct {
+	Mean       float64 `json:"mean"`
+	Std        float64 `json:"std"`
+	PacketLoss float64 `json:"packet_loss"`
+	TotalCost  float64 `json:"total_cost"`
 }
 
 type costGetResult struct {
@@ -131,6 +139,14 @@ func vxscliCostGet(sockPath string) {
 				}
 				fmt.Printf("  %s: cost=%.2f mean=%.2f std=%.2f loss=%s prio=%d addl=%.2f\n",
 					af, info.TotalCost, info.Mean, info.Std, lossStr, info.Priority, info.AdditionalCost)
+				if info.Debounced != nil {
+					dbLossStr := fmt.Sprintf("%.2f", info.Debounced.PacketLoss)
+					if info.Debounced.PacketLoss >= 1.0 {
+						dbLossStr = "1.00 (unreachable)"
+					}
+					fmt.Printf("  %s(debounced): cost=%.2f mean=%.2f std=%.2f loss=%s\n",
+						af, info.Debounced.TotalCost, info.Debounced.Mean, info.Debounced.Std, dbLossStr)
+				}
 			}
 		}
 	}

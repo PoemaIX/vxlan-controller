@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
@@ -356,22 +357,16 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	}
 	latMu.Unlock()
 
-	// Build ProbeResults from collected data
-	results := &pb.ProbeResults{
-		ProbeId:        probeID,
-		SourceClientId: c.ClientID[:],
-		Results:        make(map[string]*pb.ProbeResultEntry),
+	// Build raw results per peer/AF
+	type rawAFResult struct {
+		result *pb.AFProbeResult
+		local  *LocalAFProbeResult
 	}
+	rawResults := make(map[latKey]*rawAFResult)
 
 	for _, peer := range peers {
-		entry := &pb.ProbeResultEntry{
-			AfResults: make(map[string]*pb.AFProbeResult),
-		}
-
 		for af := range c.Config.AFSettings {
 			afCfg := c.Config.AFSettings[af]
-
-			// Skip AFs that the peer doesn't have
 			if _, peerHasAF := peer.info.Endpoints[af]; !peerHasAF {
 				continue
 			}
@@ -383,31 +378,132 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			sentCount := sent[key]
 			latMu.Unlock()
 
-			result := &pb.AFProbeResult{
+			pbr := &pb.AFProbeResult{
 				Priority:       int32(afCfg.Priority),
 				AdditionalCost: afCfg.AdditionalCost,
 			}
+			afr := &LocalAFProbeResult{}
 
 			if sentCount == 0 || len(lats) == 0 {
-				result.LatencyMean = types.INF_LATENCY
-				result.PacketLoss = 1.0
+				pbr.LatencyMean = types.INF_LATENCY
+				pbr.PacketLoss = 1.0
+				afr.LatencyMean = types.INF_LATENCY
+				afr.PacketLoss = 1.0
 			} else {
 				var sum float64
 				for _, l := range lats {
 					sum += l
 				}
-				result.LatencyMean = sum / float64(len(lats))
-
+				mean := sum / float64(len(lats))
 				var variance float64
 				for _, l := range lats {
-					diff := l - result.LatencyMean
+					diff := l - mean
 					variance += diff * diff
 				}
-				result.LatencyStd = math.Sqrt(variance / float64(len(lats)))
-				result.PacketLoss = 1.0 - float64(len(lats))/float64(sentCount)
+				std := math.Sqrt(variance / float64(len(lats)))
+				loss := 1.0 - float64(len(lats))/float64(sentCount)
+
+				pbr.LatencyMean = mean
+				pbr.LatencyStd = std
+				pbr.PacketLoss = loss
+				afr.LatencyMean = mean
+				afr.LatencyStd = std
+				afr.PacketLoss = loss
 			}
 
-			entry.AfResults[string(af)] = result
+			rawResults[key] = &rawAFResult{result: pbr, local: afr}
+		}
+	}
+
+	// Push raw results into ring buffer and compute debounced results
+	windowSize := c.Config.ProbeWindowSize
+
+	c.mu.Lock()
+
+	debouncedResults := make(map[latKey]*rawAFResult)
+
+	for key, raw := range rawResults {
+		afCfg := c.Config.AFSettings[key.af]
+
+		// packet_loss == 1.0 bypass: don't store in ring buffer, propagate immediately
+		if raw.local.PacketLoss >= 1.0 {
+			debouncedResults[key] = raw
+			continue
+		}
+
+		hk := probeHistoryKey{ClientID: key.clientID, AF: key.af}
+		history := c.probeHistory[hk]
+
+		history = append(history, raw.local)
+		if len(history) > windowSize {
+			history = history[len(history)-windowSize:]
+		}
+		c.probeHistory[hk] = history
+
+		// Find median of means (pick the result whose mean is the median)
+		type indexedMean struct {
+			idx  int
+			mean float64
+		}
+		var reachable []indexedMean
+		for i, h := range history {
+			if h.PacketLoss < 1.0 {
+				reachable = append(reachable, indexedMean{idx: i, mean: h.LatencyMean})
+			}
+		}
+
+		if len(reachable) == 0 {
+			debouncedResults[key] = raw
+			continue
+		}
+
+		sort.Slice(reachable, func(i, j int) bool {
+			return reachable[i].mean < reachable[j].mean
+		})
+
+		medianEntry := history[reachable[len(reachable)/2].idx]
+
+		dbPb := &pb.AFProbeResult{
+			LatencyMean:    medianEntry.LatencyMean,
+			LatencyStd:     medianEntry.LatencyStd,
+			PacketLoss:     medianEntry.PacketLoss,
+			Priority:       int32(afCfg.Priority),
+			AdditionalCost: afCfg.AdditionalCost,
+		}
+		dbLocal := &LocalAFProbeResult{
+			LatencyMean: medianEntry.LatencyMean,
+			LatencyStd:  medianEntry.LatencyStd,
+			PacketLoss:  medianEntry.PacketLoss,
+		}
+		debouncedResults[key] = &rawAFResult{result: dbPb, local: dbLocal}
+	}
+
+	c.mu.Unlock()
+
+	// Build ProbeResults proto
+	results := &pb.ProbeResults{
+		ProbeId:        probeID,
+		SourceClientId: c.ClientID[:],
+		Results:        make(map[string]*pb.ProbeResultEntry),
+	}
+
+	for _, peer := range peers {
+		entry := &pb.ProbeResultEntry{
+			AfResults:          make(map[string]*pb.AFProbeResult),
+			DebouncedAfResults: make(map[string]*pb.AFProbeResult),
+		}
+
+		for af := range c.Config.AFSettings {
+			if _, peerHasAF := peer.info.Endpoints[af]; !peerHasAF {
+				continue
+			}
+			key := latKey{clientID: peer.clientID, af: af}
+			if raw, ok := rawResults[key]; ok {
+				entry.AfResults[string(af)] = raw.result
+			}
+			if db, ok := debouncedResults[key]; ok {
+				entry.DebouncedAfResults[string(af)] = db.result
+			}
 		}
 
 		results.Results[peer.clientID.Hex()] = entry
@@ -417,40 +513,24 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	c.mu.Lock()
 	c.lastProbeTime = time.Now()
 	c.lastProbeResults = make(map[types.ClientID]*LocalProbeResult)
+	c.lastDebouncedResults = make(map[types.ClientID]*LocalProbeResult)
 	for _, peer := range peers {
 		lpr := &LocalProbeResult{AFResults: make(map[types.AFName]*LocalAFProbeResult)}
+		dlpr := &LocalProbeResult{AFResults: make(map[types.AFName]*LocalAFProbeResult)}
 		for af := range c.Config.AFSettings {
-			// Skip AFs that the peer doesn't have
 			if _, peerHasAF := peer.info.Endpoints[af]; !peerHasAF {
 				continue
 			}
-
 			key := latKey{clientID: peer.clientID, af: af}
-			latMu.Lock()
-			lats := latencies[key]
-			sentCount := sent[key]
-			latMu.Unlock()
-			afr := &LocalAFProbeResult{}
-			if sentCount == 0 || len(lats) == 0 {
-				afr.LatencyMean = types.INF_LATENCY
-				afr.PacketLoss = 1.0
-			} else {
-				var sum float64
-				for _, l := range lats {
-					sum += l
-				}
-				afr.LatencyMean = sum / float64(len(lats))
-				var variance float64
-				for _, l := range lats {
-					diff := l - afr.LatencyMean
-					variance += diff * diff
-				}
-				afr.LatencyStd = math.Sqrt(variance / float64(len(lats)))
-				afr.PacketLoss = 1.0 - float64(len(lats))/float64(sentCount)
+			if raw, ok := rawResults[key]; ok {
+				lpr.AFResults[af] = raw.local
 			}
-			lpr.AFResults[af] = afr
+			if db, ok := debouncedResults[key]; ok {
+				dlpr.AFResults[af] = db.local
+			}
 		}
 		c.lastProbeResults[peer.clientID] = lpr
+		c.lastDebouncedResults[peer.clientID] = dlpr
 	}
 	c.mu.Unlock()
 

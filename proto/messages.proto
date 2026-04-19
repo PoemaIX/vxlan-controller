@@ -134,6 +134,7 @@ message ProbeResults {
 
 message ProbeResultEntry {
   map<string, AFProbeResult> af_results = 1; // key = af_name
+  map<string, AFProbeResult> debounced_af_results = 2; // key = af_name; smoothed over window
 }
 
 message AFProbeResult {

@@ -26,6 +26,7 @@ type ClientConfigFile struct {
 	AFSettings         map[string]*ClientAFConfigFile `yaml:"address_families"`
 	InitTimeout        int                            `yaml:"init_timeout"`
 	StatsIntervalS     int                            `yaml:"stats_interval_s"`
+	ProbeWindowSize    int                            `yaml:"probe_window_size"`
 	NTPServers         []string                       `yaml:"ntp_servers"`
 	NTPPeriodH         int                            `yaml:"ntp_period_h"`
 	NTPRTTThresholdMs  int                            `yaml:"ntp_rtt_threshold_ms"`
@@ -71,6 +72,7 @@ type ClientConfig struct {
 	AFSettings         map[types.AFName]*ClientAFConfig
 	InitTimeout        time.Duration
 	StatsInterval      time.Duration
+	ProbeWindowSize    int
 	NTPServers         []string
 	NTPPeriod          time.Duration
 	NTPRTTThreshold    time.Duration
@@ -129,6 +131,7 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		NTPServers:         raw.NTPServers,
 		InitTimeout:        time.Duration(raw.InitTimeout) * time.Second,
 		StatsInterval:      time.Duration(raw.StatsIntervalS) * time.Second,
+		ProbeWindowSize:    raw.ProbeWindowSize,
 		NTPPeriod:          time.Duration(raw.NTPPeriodH) * time.Hour,
 		NTPRTTThreshold:    time.Duration(raw.NTPRTTThresholdMs) * time.Millisecond,
 		Filters:            filter.ParseFilterConfigFile(raw.Filters, configDir),

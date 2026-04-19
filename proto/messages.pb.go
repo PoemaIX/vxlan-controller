@@ -1214,10 +1214,11 @@ func (x *ProbeResults) GetResults() map[string]*ProbeResultEntry {
 }
 
 type ProbeResultEntry struct {
-	state         protoimpl.MessageState    `protogen:"open.v1"`
-	AfResults     map[string]*AFProbeResult `protobuf:"bytes,1,rep,name=af_results,json=afResults,proto3" json:"af_results,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // key = af_name
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state              protoimpl.MessageState    `protogen:"open.v1"`
+	AfResults          map[string]*AFProbeResult `protobuf:"bytes,1,rep,name=af_results,json=afResults,proto3" json:"af_results,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`                              // key = af_name
+	DebouncedAfResults map[string]*AFProbeResult `protobuf:"bytes,2,rep,name=debounced_af_results,json=debouncedAfResults,proto3" json:"debounced_af_results,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // key = af_name; smoothed over window
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ProbeResultEntry) Reset() {
@@ -1253,6 +1254,13 @@ func (*ProbeResultEntry) Descriptor() ([]byte, []int) {
 func (x *ProbeResultEntry) GetAfResults() map[string]*AFProbeResult {
 	if x != nil {
 		return x.AfResults
+	}
+	return nil
+}
+
+func (x *ProbeResultEntry) GetDebouncedAfResults() map[string]*AFProbeResult {
+	if x != nil {
+		return x.DebouncedAfResults
 	}
 	return nil
 }
@@ -1907,11 +1915,15 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\aresults\x18\x03 \x03(\v2*.vxlancontroller.ProbeResults.ResultsEntryR\aresults\x1a]\n" +
 	"\fResultsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x127\n" +
-	"\x05value\x18\x02 \x01(\v2!.vxlancontroller.ProbeResultEntryR\x05value:\x028\x01\"\xc1\x01\n" +
+	"\x05value\x18\x02 \x01(\v2!.vxlancontroller.ProbeResultEntryR\x05value:\x028\x01\"\x95\x03\n" +
 	"\x10ProbeResultEntry\x12O\n" +
 	"\n" +
-	"af_results\x18\x01 \x03(\v20.vxlancontroller.ProbeResultEntry.AfResultsEntryR\tafResults\x1a\\\n" +
+	"af_results\x18\x01 \x03(\v20.vxlancontroller.ProbeResultEntry.AfResultsEntryR\tafResults\x12k\n" +
+	"\x14debounced_af_results\x18\x02 \x03(\v29.vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntryR\x12debouncedAfResults\x1a\\\n" +
 	"\x0eAfResultsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
+	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\x1ae\n" +
+	"\x17DebouncedAfResultsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
 	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\"\xb9\x01\n" +
 	"\rAFProbeResult\x12!\n" +
@@ -1969,7 +1981,7 @@ func file_proto_messages_proto_rawDescGZIP() []byte {
 	return file_proto_messages_proto_rawDescData
 }
 
-var file_proto_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_proto_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_proto_messages_proto_goTypes = []any{
 	(*ClientRegister)(nil),         // 0: vxlancontroller.ClientRegister
 	(*AFEndpoint)(nil),             // 1: vxlancontroller.AFEndpoint
@@ -2006,6 +2018,7 @@ var file_proto_messages_proto_goTypes = []any{
 	nil,                            // 32: vxlancontroller.RouteTableEntryProto.OwnersEntry
 	nil,                            // 33: vxlancontroller.ProbeResults.ResultsEntry
 	nil,                            // 34: vxlancontroller.ProbeResultEntry.AfResultsEntry
+	nil,                            // 35: vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntry
 }
 var file_proto_messages_proto_depIdxs = []int32{
 	29, // 0: vxlancontroller.ClientRegister.af_endpoints:type_name -> vxlancontroller.ClientRegister.AfEndpointsEntry
@@ -2029,19 +2042,21 @@ var file_proto_messages_proto_depIdxs = []int32{
 	32, // 18: vxlancontroller.RouteTableEntryProto.owners:type_name -> vxlancontroller.RouteTableEntryProto.OwnersEntry
 	33, // 19: vxlancontroller.ProbeResults.results:type_name -> vxlancontroller.ProbeResults.ResultsEntry
 	34, // 20: vxlancontroller.ProbeResultEntry.af_results:type_name -> vxlancontroller.ProbeResultEntry.AfResultsEntry
-	24, // 21: vxlancontroller.McastStatsReport.mac_stats:type_name -> vxlancontroller.MACMcastStats
-	25, // 22: vxlancontroller.MACMcastStats.reject_reasons:type_name -> vxlancontroller.McastRejectReason
-	26, // 23: vxlancontroller.McastRejectReason.details:type_name -> vxlancontroller.McastRejectDetail
-	1,  // 24: vxlancontroller.ClientRegister.AfEndpointsEntry.value:type_name -> vxlancontroller.AFEndpoint
-	5,  // 25: vxlancontroller.ControllerState.ClientsEntry.value:type_name -> vxlancontroller.ClientInfoProto
-	6,  // 26: vxlancontroller.ClientInfoProto.EndpointsEntry.value:type_name -> vxlancontroller.EndpointProto
-	19, // 27: vxlancontroller.ProbeResults.ResultsEntry.value:type_name -> vxlancontroller.ProbeResultEntry
-	20, // 28: vxlancontroller.ProbeResultEntry.AfResultsEntry.value:type_name -> vxlancontroller.AFProbeResult
-	29, // [29:29] is the sub-list for method output_type
-	29, // [29:29] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	35, // 21: vxlancontroller.ProbeResultEntry.debounced_af_results:type_name -> vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntry
+	24, // 22: vxlancontroller.McastStatsReport.mac_stats:type_name -> vxlancontroller.MACMcastStats
+	25, // 23: vxlancontroller.MACMcastStats.reject_reasons:type_name -> vxlancontroller.McastRejectReason
+	26, // 24: vxlancontroller.McastRejectReason.details:type_name -> vxlancontroller.McastRejectDetail
+	1,  // 25: vxlancontroller.ClientRegister.AfEndpointsEntry.value:type_name -> vxlancontroller.AFEndpoint
+	5,  // 26: vxlancontroller.ControllerState.ClientsEntry.value:type_name -> vxlancontroller.ClientInfoProto
+	6,  // 27: vxlancontroller.ClientInfoProto.EndpointsEntry.value:type_name -> vxlancontroller.EndpointProto
+	19, // 28: vxlancontroller.ProbeResults.ResultsEntry.value:type_name -> vxlancontroller.ProbeResultEntry
+	20, // 29: vxlancontroller.ProbeResultEntry.AfResultsEntry.value:type_name -> vxlancontroller.AFProbeResult
+	20, // 30: vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntry.value:type_name -> vxlancontroller.AFProbeResult
+	31, // [31:31] is the sub-list for method output_type
+	31, // [31:31] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_proto_messages_proto_init() }
@@ -2062,7 +2077,7 @@ func file_proto_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_messages_proto_rawDesc), len(file_proto_messages_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   35,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
