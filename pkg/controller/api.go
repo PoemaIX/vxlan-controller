@@ -47,12 +47,21 @@ func (c *Controller) handleAPI(method string, params json.RawMessage) (interface
 
 // AFCostInfo is the per-AF cost data returned by cost.get.
 type AFCostInfo struct {
-	Mean           float64 `json:"mean"`
-	Std            float64 `json:"std"`
-	PacketLoss     float64 `json:"packet_loss"`
-	Priority       int     `json:"priority"`
-	AdditionalCost float64 `json:"additional_cost"`
-	TotalCost      float64 `json:"total_cost"`
+	Mean           float64          `json:"mean"`
+	Std            float64          `json:"std"`
+	PacketLoss     float64          `json:"packet_loss"`
+	Priority       int              `json:"priority"`
+	AdditionalCost float64          `json:"additional_cost"`
+	TotalCost      float64          `json:"total_cost"`
+	Debounced      *AFCostDebounced `json:"debounced,omitempty"`
+}
+
+// AFCostDebounced is the debounced (smoothed) cost data.
+type AFCostDebounced struct {
+	Mean       float64 `json:"mean"`
+	Std        float64 `json:"std"`
+	PacketLoss float64 `json:"packet_loss"`
+	TotalCost  float64 `json:"total_cost"`
 }
 
 // CostGetResult is the result of cost.get.
@@ -80,15 +89,29 @@ func (c *Controller) apiCostGet() (*CostGetResult, error) {
 			if result.Matrix[srcName][dstName] == nil {
 				result.Matrix[srcName][dstName] = make(map[string]*AFCostInfo)
 			}
-			for af, al := range li.AFs {
-				result.Matrix[srcName][dstName][string(af)] = &AFCostInfo{
-					Mean:           al.Mean,
-					Std:            al.Std,
-					PacketLoss:     al.PacketLoss,
-					Priority:       al.Priority,
-					AdditionalCost: al.AdditionalCost,
-					TotalCost:      al.Mean + al.AdditionalCost,
+			// Show raw latest values at top level, debounced nested
+			rawSource := li.RawAFs
+			if len(rawSource) == 0 {
+				rawSource = li.AFs
+			}
+			for af, raw := range rawSource {
+				info := &AFCostInfo{
+					Mean:           raw.Mean,
+					Std:            raw.Std,
+					PacketLoss:     raw.PacketLoss,
+					Priority:       raw.Priority,
+					AdditionalCost: raw.AdditionalCost,
+					TotalCost:      raw.Mean + raw.AdditionalCost,
 				}
+				if db, ok := li.AFs[af]; ok {
+					info.Debounced = &AFCostDebounced{
+						Mean:       db.Mean,
+						Std:        db.Std,
+						PacketLoss: db.PacketLoss,
+						TotalCost:  db.Mean + db.AdditionalCost,
+					}
+				}
+				result.Matrix[srcName][dstName][string(af)] = info
 			}
 		}
 	}

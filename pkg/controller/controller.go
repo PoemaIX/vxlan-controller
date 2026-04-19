@@ -646,10 +646,28 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		}
 
 		li := &types.LatencyInfo{
-			AFs: make(map[types.AFName]*types.AFLatency),
+			AFs:    make(map[types.AFName]*types.AFLatency),
+			RawAFs: make(map[types.AFName]*types.AFLatency),
 		}
-		newReachable := false
+
+		// Raw (latest) results
 		for afStr, afResult := range entry.AfResults {
+			li.RawAFs[types.AFName(afStr)] = &types.AFLatency{
+				Mean:           afResult.LatencyMean,
+				Std:            afResult.LatencyStd,
+				PacketLoss:     afResult.PacketLoss,
+				Priority:       int(afResult.Priority),
+				AdditionalCost: afResult.AdditionalCost,
+			}
+		}
+
+		// Debounced results (used for routing); fall back to raw if absent
+		newReachable := false
+		debouncedSource := entry.DebouncedAfResults
+		if len(debouncedSource) == 0 {
+			debouncedSource = entry.AfResults
+		}
+		for afStr, afResult := range debouncedSource {
 			li.AFs[types.AFName(afStr)] = &types.AFLatency{
 				Mean:           afResult.LatencyMean,
 				Std:            afResult.LatencyStd,
@@ -671,8 +689,11 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 			if now.Sub(old.LastReachable) > c.Config.ClientOfflineTimeout {
 				li.LastReachable = old.LastReachable
 				c.State.LatencyMatrix[srcID][dstID] = li
+			} else {
+				// Keep old reachable routing data, but update RawAFs so
+				// webui/API reflect the latest unreachable state
+				old.RawAFs = li.RawAFs
 			}
-			// Otherwise keep old reachable data (transient failure)
 		} else {
 			// No old data — store the unreachable result
 			c.State.LatencyMatrix[srcID][dstID] = li

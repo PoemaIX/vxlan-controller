@@ -82,12 +82,14 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 		snap.RouteTable = append(snap.RouteTable, rj)
 	}
 
-	// Latency matrix (from precomputed best paths)
+	// Latency matrix (from precomputed best paths, show raw latest for display)
 	for src, dsts := range c.State.BestPaths {
 		row := webui.LatencyRowJSON{Src: src.Hex()}
 		for dst, bp := range dsts {
 			latency := types.INF_LATENCY
-			if bp.Raw != nil {
+			if bp.Latest != nil {
+				latency = bp.Latest.Mean
+			} else if bp.Raw != nil {
 				latency = bp.Raw.Mean
 			}
 			row.Entries = append(row.Entries, webui.LatencyCellJSON{

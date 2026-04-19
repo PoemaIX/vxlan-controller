@@ -178,8 +178,9 @@ type peerEndpointResult struct {
 }
 
 type peerProbeResult struct {
-	Time      string                            `json:"time"`
-	AFResults map[string]*peerAFProbeResultCLI  `json:"af_results"`
+	Time               string                            `json:"time"`
+	AFResults          map[string]*peerAFProbeResultCLI  `json:"af_results"`
+	DebouncedAFResults map[string]*peerAFProbeResultCLI  `json:"debounced_af_results,omitempty"`
 }
 
 type peerAFProbeResultCLI struct {
@@ -234,6 +235,10 @@ func vxccliPeerList(sockPath string) {
 				} else {
 					lossStr := fmt.Sprintf("%.0f%%", pr.PacketLoss*100)
 					fmt.Printf("    %s: mean=%.2fms std=%.2fms loss=%s\n", af, pr.LatencyMean, pr.LatencyStd, lossStr)
+				}
+				if db, ok := peer.Probe.DebouncedAFResults[af]; ok && db.PacketLoss < 1.0 {
+					dbLossStr := fmt.Sprintf("%.0f%%", db.PacketLoss*100)
+					fmt.Printf("    %s(debounced): mean=%.2fms std=%.2fms loss=%s\n", af, db.LatencyMean, db.LatencyStd, dbLossStr)
 				}
 			}
 		} else {

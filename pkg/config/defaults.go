@@ -75,6 +75,7 @@ var DefaultClientConfig = ClientConfigFile{
 	VxlanFirewallTable: "vxlan_fw",
 	InitTimeout:        10,
 	StatsIntervalS:     5,
+	ProbeWindowSize:    15,
 	NTPServers:         DefaultNTPServers,
 	NTPPeriodH:         23,
 	NTPRTTThresholdMs:  50,
@@ -118,7 +119,7 @@ var DefaultClientConfig = ClientConfigFile{
 
 var DefaultControllerConfig = ControllerConfigFile{
 	PrivateKey:                "<base64 private key from: wg genkey>",
-	CostMode:                 "probe",
+	CostMode:                  "probe",
 	ClientOfflineTimeout:      30,
 	SyncNewClientDebounce:     3,
 	SyncNewClientDebounceMax:  10,

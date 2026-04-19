@@ -78,8 +78,9 @@ type AFLatency struct {
 
 // LatencyInfo stores all per-AF probe data between a src→dst client pair.
 type LatencyInfo struct {
-	AFs           map[AFName]*AFLatency
-	LastReachable time.Time // last time any AF was reachable (packet_loss < 1.0)
+	AFs           map[AFName]*AFLatency // debounced (used for routing)
+	RawAFs        map[AFName]*AFLatency // raw latest probe result
+	LastReachable time.Time             // last time any AF was reachable (packet_loss < 1.0)
 }
 
 // BestPath selects the best AF and returns (af, cost).
@@ -107,9 +108,10 @@ func (li *LatencyInfo) BestPath() (AFName, float64) {
 
 // BestPathEntry is a precomputed BestPath result.
 type BestPathEntry struct {
-	AF   AFName
-	Cost float64     // mean + additional_cost (used by Floyd-Warshall)
-	Raw  *AFLatency  // full probe data for the selected AF
+	AF     AFName
+	Cost   float64    // debounced mean + additional_cost (used by Floyd-Warshall)
+	Raw    *AFLatency // debounced probe data for the selected AF
+	Latest *AFLatency // raw latest probe data for the selected AF (webui display)
 }
 
 // ComputeBestPaths precomputes BestPath() for every src→dst pair.
@@ -120,7 +122,11 @@ func ComputeBestPaths(m map[ClientID]map[ClientID]*LatencyInfo) map[ClientID]map
 		for dst, li := range dsts {
 			af, cost := li.BestPath()
 			if af != "" {
-				row[dst] = &BestPathEntry{AF: af, Cost: cost, Raw: li.AFs[af]}
+				bp := &BestPathEntry{AF: af, Cost: cost, Raw: li.AFs[af]}
+				if li.RawAFs != nil {
+					bp.Latest = li.RawAFs[af]
+				}
+				row[dst] = bp
 			}
 		}
 		result[src] = row
@@ -168,13 +174,16 @@ func ComputeBestPathsStatic(
 			}
 
 			if bestAF != "" {
-				var raw *AFLatency
+				var raw, latest *AFLatency
 				if li, ok := latencyMatrix[src]; ok {
 					if info, ok := li[dst]; ok {
 						raw = info.AFs[bestAF]
+						if info.RawAFs != nil {
+							latest = info.RawAFs[bestAF]
+						}
 					}
 				}
-				row[dst] = &BestPathEntry{AF: bestAF, Cost: bestCost, Raw: raw}
+				row[dst] = &BestPathEntry{AF: bestAF, Cost: bestCost, Raw: raw, Latest: latest}
 			}
 		}
 		if len(row) > 0 {

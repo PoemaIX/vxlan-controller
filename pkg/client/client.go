@@ -72,8 +72,10 @@ type Client struct {
 	pendingHandshakesMu sync.Mutex
 	probeResultsMu      sync.Mutex
 	probeResponseChs    map[uint64]chan probeResponseData
-	lastProbeTime       time.Time
-	lastProbeResults    map[types.ClientID]*LocalProbeResult
+	lastProbeTime            time.Time
+	lastProbeResults         map[types.ClientID]*LocalProbeResult
+	lastDebouncedResults     map[types.ClientID]*LocalProbeResult
+	probeHistory             map[probeHistoryKey][]*LocalAFProbeResult
 
 	// Channels
 	fdbNotifyCh       chan struct{}
@@ -167,6 +169,11 @@ type LocalAFProbeResult struct {
 	PacketLoss  float64
 }
 
+type probeHistoryKey struct {
+	ClientID types.ClientID
+	AF       types.AFName
+}
+
 // ClientInfoView is the Client's view of a ClientInfo from the Controller.
 type ClientInfoView struct {
 	ClientID   types.ClientID
@@ -202,6 +209,7 @@ func New(cfg *config.ClientConfig) *Client {
 		probeSessions:     crypto.NewSessionManager(),
 		pendingHandshakes: make(map[types.ClientID]*crypto.HandshakeState),
 		probeResponseChs:  make(map[uint64]chan probeResponseData),
+		probeHistory:      make(map[probeHistoryKey][]*LocalAFProbeResult),
 		fdbNotifyCh:       make(chan struct{}, 1),
 		fwNotifyCh:        make(chan struct{}, 1),
 		authorityChangeCh: make(chan struct{}, 1),
@@ -1202,8 +1210,9 @@ type peerEndpointInfo struct {
 }
 
 type peerProbeInfo struct {
-	Time      string                        `json:"time"`
-	AFResults map[string]*peerAFProbeResult `json:"af_results"`
+	Time              string                        `json:"time"`
+	AFResults         map[string]*peerAFProbeResult `json:"af_results"`
+	DebouncedAFResults map[string]*peerAFProbeResult `json:"debounced_af_results,omitempty"`
 }
 
 type peerAFProbeResult struct {
@@ -1257,6 +1266,16 @@ func (c *Client) apiPeerList() ([]peerListEntry, error) {
 					LatencyMean: afr.LatencyMean,
 					LatencyStd:  afr.LatencyStd,
 					PacketLoss:  afr.PacketLoss,
+				}
+			}
+			if dr, ok := c.lastDebouncedResults[clientID]; ok {
+				entry.Probe.DebouncedAFResults = make(map[string]*peerAFProbeResult)
+				for af, afr := range dr.AFResults {
+					entry.Probe.DebouncedAFResults[string(af)] = &peerAFProbeResult{
+						LatencyMean: afr.LatencyMean,
+						LatencyStd:  afr.LatencyStd,
+						PacketLoss:  afr.PacketLoss,
+					}
 				}
 			}
 		}
