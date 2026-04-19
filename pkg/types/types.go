@@ -74,6 +74,7 @@ type AFLatency struct {
 	PacketLoss     float64
 	Priority       int
 	AdditionalCost float64
+	SwitchCost     float64
 }
 
 // LatencyInfo stores all per-AF probe data between a src→dst client pair.
@@ -95,7 +96,7 @@ func (li *LatencyInfo) BestPath() (AFName, float64) {
 		if al.Mean >= INF_LATENCY {
 			continue
 		}
-		cost := al.Mean + al.AdditionalCost
+		cost := al.Mean + al.AdditionalCost + al.SwitchCost
 		if al.Priority < bestPriority ||
 			(al.Priority == bestPriority && cost < bestCost) {
 			bestPriority = al.Priority

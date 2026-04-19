@@ -27,6 +27,7 @@ type ClientConfigFile struct {
 	InitTimeout        int                            `yaml:"init_timeout"`
 	StatsIntervalS     int                            `yaml:"stats_interval_s"`
 	ProbeWindowSize    int                            `yaml:"probe_window_size"`
+	AFSwitchCost       float64                        `yaml:"af_switch_cost"`
 	NTPServers         []string                       `yaml:"ntp_servers"`
 	NTPPeriodH         int                            `yaml:"ntp_period_h"`
 	NTPRTTThresholdMs  int                            `yaml:"ntp_rtt_threshold_ms"`
@@ -73,6 +74,7 @@ type ClientConfig struct {
 	InitTimeout        time.Duration
 	StatsInterval      time.Duration
 	ProbeWindowSize    int
+	AFSwitchCost       float64
 	NTPServers         []string
 	NTPPeriod          time.Duration
 	NTPRTTThreshold    time.Duration
@@ -132,6 +134,7 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 		InitTimeout:        time.Duration(raw.InitTimeout) * time.Second,
 		StatsInterval:      time.Duration(raw.StatsIntervalS) * time.Second,
 		ProbeWindowSize:    raw.ProbeWindowSize,
+		AFSwitchCost:       raw.AFSwitchCost,
 		NTPPeriod:          time.Duration(raw.NTPPeriodH) * time.Hour,
 		NTPRTTThreshold:    time.Duration(raw.NTPRTTThresholdMs) * time.Millisecond,
 		Filters:            filter.ParseFilterConfigFile(raw.Filters, configDir),

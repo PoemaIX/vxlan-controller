@@ -478,6 +478,58 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		debouncedResults[key] = &rawAFResult{result: dbPb, local: dbLocal}
 	}
 
+	// AF hysteresis: update preferred_af per peer based on debounced means
+	switchCost := c.Config.AFSwitchCost
+	for _, peer := range peers {
+		// Find AF with lowest debounced mean (reachable only)
+		bestAF := types.AFName("")
+		bestMean := types.INF_LATENCY
+		for af := range c.Config.AFSettings {
+			key := latKey{clientID: peer.clientID, af: af}
+			db, ok := debouncedResults[key]
+			if !ok || db.local.PacketLoss >= 1.0 {
+				continue
+			}
+			if db.local.LatencyMean < bestMean {
+				bestMean = db.local.LatencyMean
+				bestAF = af
+			}
+		}
+
+		if bestAF == "" {
+			continue
+		}
+
+		curPref := c.preferredAF[peer.clientID]
+		if curPref == "" {
+			c.preferredAF[peer.clientID] = bestAF
+		} else {
+			// Check if current preferred is still reachable
+			prefKey := latKey{clientID: peer.clientID, af: curPref}
+			prefDB, prefOK := debouncedResults[prefKey]
+			if !prefOK || prefDB.local.PacketLoss >= 1.0 {
+				c.preferredAF[peer.clientID] = bestAF
+			} else if prefDB.local.LatencyMean-bestMean > switchCost {
+				c.preferredAF[peer.clientID] = bestAF
+			}
+		}
+
+		// Set switch_cost on debounced proto results
+		pref := c.preferredAF[peer.clientID]
+		for af := range c.Config.AFSettings {
+			key := latKey{clientID: peer.clientID, af: af}
+			db, ok := debouncedResults[key]
+			if !ok {
+				continue
+			}
+			if af == pref {
+				db.result.SwitchCost = 0
+			} else {
+				db.result.SwitchCost = switchCost
+			}
+		}
+	}
+
 	c.mu.Unlock()
 
 	// Build ProbeResults proto
