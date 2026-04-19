@@ -168,11 +168,12 @@ func populateMockState(c *Controller, sites []mockSiteConfig) {
 				AF:   "v4",
 				Cost: latency + 20,
 				Raw: &types.AFLatency{
-					Mean:           latency,
-					Std:            latency * 0.05,
-					PacketLoss:     0,
-					Priority:       10,
-					AdditionalCost: 20,
+					Mean:        latency,
+					Std:         latency * 0.05,
+					PacketLoss:  0,
+					Priority:    10,
+					ForwardCost: 20,
+					QualityCost: latency,
 				},
 			}
 		}
@@ -268,7 +269,8 @@ func jitterState(c *Controller, sites []mockSiteConfig) {
 			jitter := base * 0.15 * (rng.Float64() - 0.5)
 			bp.Raw.Mean = base + jitter
 			bp.Raw.Std = base * 0.05 * (1 + rng.Float64())
-			bp.Cost = bp.Raw.Mean + bp.Raw.AdditionalCost
+			bp.Raw.QualityCost = bp.Raw.Mean
+			bp.Cost = bp.Raw.QualityCost + bp.Raw.ForwardCost
 			if rng.Float64() < 0.05 {
 				bp.Raw.PacketLoss = rng.Float64() * 0.1
 			} else {

@@ -47,13 +47,13 @@ func (c *Controller) handleAPI(method string, params json.RawMessage) (interface
 
 // AFCostInfo is the per-AF cost data returned by cost.get.
 type AFCostInfo struct {
-	Mean           float64          `json:"mean"`
-	Std            float64          `json:"std"`
-	PacketLoss     float64          `json:"packet_loss"`
-	Priority       int              `json:"priority"`
-	AdditionalCost float64          `json:"additional_cost"`
-	TotalCost      float64          `json:"total_cost"`
-	Debounced      *AFCostDebounced `json:"debounced,omitempty"`
+	Mean        float64          `json:"mean"`
+	Std         float64          `json:"std"`
+	PacketLoss  float64          `json:"packet_loss"`
+	Priority    int              `json:"priority"`
+	ForwardCost float64          `json:"forward_cost"`
+	TotalCost   float64          `json:"total_cost"`
+	Debounced   *AFCostDebounced `json:"debounced,omitempty"`
 }
 
 // AFCostDebounced is the debounced (smoothed) cost data.
@@ -97,17 +97,17 @@ func (c *Controller) apiCostGet() (*CostGetResult, error) {
 			}
 			for af, raw := range rawSource {
 				info := &AFCostInfo{
-					Mean:           raw.Mean,
-					Std:            raw.Std,
-					PacketLoss:     raw.PacketLoss,
-					Priority:       raw.Priority,
-					AdditionalCost: raw.AdditionalCost,
-					TotalCost:      raw.Mean + raw.AdditionalCost,
+					Mean:        raw.Mean,
+					Std:         raw.Std,
+					PacketLoss:  raw.PacketLoss,
+					Priority:    raw.Priority,
+					ForwardCost: raw.ForwardCost,
+					TotalCost:   raw.QualityCost + raw.ForwardCost,
 				}
 				if db, ok := li.AFs[af]; ok {
-					totalCost := db.Cost
+					totalCost := db.FinalCost
 					if totalCost == 0 {
-						totalCost = db.Mean + db.AdditionalCost + db.SwitchCost
+						totalCost = db.QualityCost + db.ForwardCost + db.SwitchCost
 					}
 					info.Debounced = &AFCostDebounced{
 						Mean:       db.Mean,
@@ -182,7 +182,7 @@ func (c *Controller) apiCostStore() (interface{}, error) {
 				if al.PacketLoss >= 1.0 {
 					continue // skip unreachable
 				}
-				nameCosts[srcName][dstName][string(af)] = al.Mean + al.AdditionalCost
+				nameCosts[srcName][dstName][string(af)] = al.QualityCost + al.ForwardCost
 			}
 		}
 	}

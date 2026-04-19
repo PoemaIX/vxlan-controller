@@ -52,7 +52,7 @@ type ClientAFConfigFile struct {
 	VxlanSrcPortStart uint16                   `yaml:"vxlan_src_port_start"`
 	VxlanSrcPortEnd   uint16                   `yaml:"vxlan_src_port_end"`
 	Priority          int                      `yaml:"priority"`
-	AdditionalCost    float64                  `yaml:"additional_cost"`
+	ForwardCost       float64                  `yaml:"forward_cost"`
 	Controllers       []ControllerEndpointFile `yaml:"controllers"`
 }
 
@@ -100,7 +100,7 @@ type ClientAFConfig struct {
 	VxlanSrcPortStart uint16
 	VxlanSrcPortEnd   uint16
 	Priority          int
-	AdditionalCost    float64
+	ForwardCost       float64
 	Controllers       []ControllerEndpoint
 }
 
@@ -174,7 +174,7 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 			VxlanSrcPortStart: afRaw.VxlanSrcPortStart,
 			VxlanSrcPortEnd:   afRaw.VxlanSrcPortEnd,
 			Priority:          afRaw.Priority,
-			AdditionalCost:    afRaw.AdditionalCost,
+			ForwardCost:       afRaw.ForwardCost,
 		}
 
 		hasBindAddr := afRaw.BindAddr != ""

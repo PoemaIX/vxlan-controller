@@ -69,13 +69,14 @@ type Type2Route struct {
 
 // AFLatency stores probe results for a single AF between two clients.
 type AFLatency struct {
-	Mean           float64
-	Std            float64
-	PacketLoss     float64
-	Priority       int
-	AdditionalCost float64
-	SwitchCost     float64
-	Cost           float64 // final routing cost (computed by client)
+	Mean        float64
+	Std         float64
+	PacketLoss  float64
+	Priority    int
+	ForwardCost float64
+	SwitchCost  float64
+	QualityCost float64 // abstract quality metric (currently = latency_mean)
+	FinalCost   float64 // quality_cost + forward_cost + switch_cost
 }
 
 // LatencyInfo stores all per-AF probe data between a src→dst client pair.
@@ -86,7 +87,7 @@ type LatencyInfo struct {
 }
 
 // BestPath selects the best AF and returns (af, cost).
-// Selection: lowest priority first, then lowest cost (mean + additional_cost).
+// Selection: lowest priority first, then lowest final_cost.
 // Returns ("", INF_LATENCY) if no AF is reachable.
 func (li *LatencyInfo) BestPath() (AFName, float64) {
 	bestAF := AFName("")
@@ -97,9 +98,9 @@ func (li *LatencyInfo) BestPath() (AFName, float64) {
 		if al.Mean >= INF_LATENCY {
 			continue
 		}
-		cost := al.Cost
+		cost := al.FinalCost
 		if cost == 0 {
-			cost = al.Mean + al.AdditionalCost + al.SwitchCost
+			cost = al.QualityCost + al.ForwardCost + al.SwitchCost
 		}
 		if al.Priority < bestPriority ||
 			(al.Priority == bestPriority && cost < bestCost) {
@@ -114,7 +115,7 @@ func (li *LatencyInfo) BestPath() (AFName, float64) {
 // BestPathEntry is a precomputed BestPath result.
 type BestPathEntry struct {
 	AF     AFName
-	Cost   float64    // debounced mean + additional_cost (used by Floyd-Warshall)
+	Cost   float64    // final_cost for routing (used by Floyd-Warshall)
 	Raw    *AFLatency // debounced probe data for the selected AF
 	Latest *AFLatency // raw latest probe data for the selected AF (webui display)
 }
