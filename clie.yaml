@@ -1,0 +1,57 @@
+private_key: 0rcv8G9xK+b1y8PJ59i2Q95+9vcNMo41KA1LDVQFd34=
+public_key: sSJzClxMZxuXid+DMX3hgP4hnzmI7GgsY41xYQWEYSc=
+bridge_name: br-kskbix-new
+clamp_mss_to_mtu: true
+clamp_mss_table: vxlan_mss
+neigh_suppress: false
+vxlan_firewall: false
+vxlan_firewall_table: vxlan_fw
+address_families:
+    v4:
+        enable: true
+        bind_addr: 192.168.4.52
+        autoip_interface: ""
+        addr_select: ""
+        probe_port: 4790
+        communication_port: 0
+        vxlan_name: vx-kskbix-v4
+        vxlan_vni: 1982
+        vxlan_mtu: 1442
+        vxlan_dst_port: 4789
+        vxlan_src_port_start: 4789
+        vxlan_src_port_end: 4790
+        priority: 10
+        forward_cost: 20
+        controllers:
+            - pubkey: /xt1YFfKBOYG31FTnx83wl5slEPBFklAau20/8B1K0s=
+              addr: 103.147.22.106:6789
+            - pubkey: 8VOMbH9EtWoz1D1Uw/SbKrTAmbG7lYX3VileLReYUzA=
+              addr: 140.115.53.126:6789
+    v6:
+        enable: true
+        bind_addr: ""
+        autoip_interface: enp6s20
+        addr_select: ""
+        probe_port: 51899
+        communication_port: 0
+        vxlan_name: vx-kskbix-v6
+        vxlan_vni: 1982
+        vxlan_mtu: 1422
+        vxlan_dst_port: 4789
+        vxlan_src_port_start: 4789
+        vxlan_src_port_end: 4790
+        priority: 10
+        forward_cost: 20
+        controllers:
+            - pubkey: /xt1YFfKBOYG31FTnx83wl5slEPBFklAau20/8B1K0s=
+              addr: '[2405:a640:1048:bbbb::bbbb]:6789'
+            - pubkey: 8VOMbH9EtWoz1D1Uw/SbKrTAmbG7lYX3VileLReYUzA=
+              addr: '[2001:288:3001:59::bbbb]:6789'
+init_timeout: 10
+stats_interval_s: 5
+ntp_servers: [] #  - time.google.com
+ntp_period_h: 23
+ntp_rtt_threshold_ms: 1000
+filters: null
+log_level: ""
+api_socket: ""
