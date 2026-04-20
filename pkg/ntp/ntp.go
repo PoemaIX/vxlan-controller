@@ -92,7 +92,12 @@ func (ts *TimeSync) Offset() time.Duration {
 }
 
 // RunLoop periodically syncs NTP. Call in a goroutine.
+// If interval <= 0 or no servers configured, returns immediately (NTP disabled).
 func (ts *TimeSync) RunLoop(interval time.Duration, stop <-chan struct{}) {
+	if len(ts.servers) == 0 || interval <= 0 {
+		return
+	}
+
 	// Initial sync
 	ts.Sync()
 
