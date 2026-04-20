@@ -220,8 +220,10 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 	}
 
 	// bind_addr vs autoip_interface (tracked via dt for bind_addr default)
-	bindStr, hasBind := nodeString(m, "bind_addr")
-	autoIP, hasAutoIP := nodeString(m, "autoip_interface")
+	bindStr, _ := nodeString(m, "bind_addr")
+	autoIP, _ := nodeString(m, "autoip_interface")
+	hasBind := bindStr != ""
+	hasAutoIP := autoIP != ""
 
 	if hasBind && hasAutoIP {
 		return nil, fmt.Errorf("bind_addr and autoip_interface are mutually exclusive")

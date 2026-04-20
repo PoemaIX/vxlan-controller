@@ -833,6 +833,10 @@ func (c *Controller) triggerTopologyUpdate() {
 
 func (c *Controller) periodicProbeLoop() {
 	interval := time.Duration(c.Config.Probing.ProbeIntervalS) * time.Second
+	if interval <= 0 {
+		vlog.Warnf("[Controller] probe_interval_s is 0, periodic probing disabled")
+		return
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

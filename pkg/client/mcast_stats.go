@@ -154,6 +154,9 @@ func (ms *McastStats) snapshotAndReset() []*pb.MACMcastStats {
 
 // mcastStatsReportLoop periodically sends mcast stats to all controllers.
 func (c *Client) mcastStatsReportLoop() {
+	if c.Config.StatsInterval <= 0 {
+		return
+	}
 	ticker := time.NewTicker(c.Config.StatsInterval)
 	defer ticker.Stop()
 
