@@ -18,7 +18,10 @@ import (
 // all our updates. A persistent mismatch triggers a fresh full re-sync.
 func (c *Client) syncCheckLoop() {
 	interval := c.Config.SyncCheckInterval
-	if interval <= 0 {
+	if interval <= 0 || c.Config.SyncCheckMaxDelay == 0 {
+		if c.Config.SyncCheckMaxDelay == 0 {
+			vlog.Warnf("[Client] sync_check_max_delay is 0, sync check disabled")
+		}
 		return
 	}
 	ticker := time.NewTicker(interval)
@@ -54,9 +57,6 @@ func (c *Client) runSyncCheck() {
 // re-sync is warranted.
 func (c *Client) checkOneController(cc *ControllerConn) bool {
 	maxDelay := c.Config.SyncCheckMaxDelay
-	if maxDelay == 0 {
-		maxDelay = 10
-	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
