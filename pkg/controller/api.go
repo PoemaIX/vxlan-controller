@@ -199,15 +199,17 @@ func (c *Controller) apiCostStore() (interface{}, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	var raw config.ControllerConfigFile
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	raw.StaticCosts = nameCosts
-	// Don't change cost_mode here - admin decides when to switch
+	// Round-trip: set static_costs in the YAML node tree, preserving other fields
+	if err := config.NodeSetField(&doc, "static_costs", nameCosts); err != nil {
+		return nil, fmt.Errorf("set static_costs: %w", err)
+	}
 
-	newData, err := yaml.Marshal(&raw)
+	newData, err := yaml.Marshal(&doc)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"os"
@@ -27,7 +26,7 @@ type AutogenConfig struct {
 	VxlanMTU          int     `yaml:"vxlan_mtu"`
 	ProbePort         uint16  `yaml:"probe_port"`
 	Priority          int     `yaml:"priority"`
-	ForwardCost    float64 `yaml:"forward_cost"`
+	ForwardCost       float64 `yaml:"forward_cost"`
 
 	Nodes       map[string]map[string]AutogenAF `yaml:"nodes"`
 	Controllers []string                        `yaml:"controllers"`
@@ -36,10 +35,10 @@ type AutogenConfig struct {
 }
 
 type AutogenWebUI struct {
-	BindAddr string                    `yaml:"bind_addr"`
-	Title    string                    `yaml:"title"`
-	URL      string                    `yaml:"url"`
-	Nodes    map[string]*WebUINodeFile `yaml:"nodes"`
+	BindAddr string                   `yaml:"bind_addr"`
+	Title    string                   `yaml:"title"`
+	URL      string                   `yaml:"url"`
+	Nodes    map[string]*WebUINode    `yaml:"nodes"`
 }
 
 // AutogenAF represents a per-AF bind config.
@@ -82,6 +81,20 @@ type autogenNodeKeys struct {
 	Pub  [32]byte
 }
 
+var DefaultAutogenConfig = AutogenConfig{
+	BridgeName:        "br-vxlan",
+	VxlanNamePrefix:   "vxlan-",
+	VxlanDstPort:      4789,
+	VxlanSrcPortStart: 4789,
+	VxlanSrcPortEnd:   4789,
+	CommunicationPort: 5000,
+	VxlanVNI:          100,
+	VxlanMTU:          1400,
+	ProbePort:         5010,
+	Priority:          10,
+	ForwardCost:       20,
+}
+
 // Autogen loads a topology file and generates controller+client configs.
 // Output files are written to the same directory as the input file.
 func Autogen(path string) error {
@@ -90,44 +103,9 @@ func Autogen(path string) error {
 		return fmt.Errorf("read topology: %w", err)
 	}
 
-	var ag AutogenConfig
+	ag := DefaultAutogenConfig
 	if err := yaml.Unmarshal(data, &ag); err != nil {
 		return fmt.Errorf("parse topology: %w", err)
-	}
-
-	// Apply defaults
-	if ag.BridgeName == "" {
-		ag.BridgeName = "br-vxlan"
-	}
-	if ag.VxlanNamePrefix == "" {
-		ag.VxlanNamePrefix = "vxlan-"
-	}
-	if ag.VxlanDstPort == 0 {
-		ag.VxlanDstPort = 4789
-	}
-	if ag.VxlanSrcPortStart == 0 {
-		ag.VxlanSrcPortStart = 4789
-	}
-	if ag.VxlanSrcPortEnd == 0 {
-		ag.VxlanSrcPortEnd = 4789
-	}
-	if ag.CommunicationPort == 0 {
-		ag.CommunicationPort = 5000
-	}
-	if ag.VxlanVNI == 0 {
-		ag.VxlanVNI = 100
-	}
-	if ag.VxlanMTU == 0 {
-		ag.VxlanMTU = 1400
-	}
-	if ag.ProbePort == 0 {
-		ag.ProbePort = 5010
-	}
-	if ag.Priority == 0 {
-		ag.Priority = 10
-	}
-	if ag.ForwardCost == 0 {
-		ag.ForwardCost = 20
 	}
 
 	// Validate node references
@@ -166,7 +144,11 @@ func Autogen(path string) error {
 	// Generate controller configs
 	for _, name := range ag.Controllers {
 		cfg := ag.buildControllerConfig(name, keys)
-		if err := writeYAML(filepath.Join(outDir, name+".controller.yaml"), cfg); err != nil {
+		data, err := MarshalControllerConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("marshal controller config for %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(outDir, name+".controller.yaml"), data, 0644); err != nil {
 			return fmt.Errorf("write controller config for %s: %w", name, err)
 		}
 		fmt.Printf("  %s.controller.yaml\n", name)
@@ -175,7 +157,11 @@ func Autogen(path string) error {
 	// Generate client configs
 	for _, name := range ag.Clients {
 		cfg := ag.buildClientConfig(name, keys)
-		if err := writeYAML(filepath.Join(outDir, name+".client.yaml"), cfg); err != nil {
+		data, err := MarshalClientConfig(cfg)
+		if err != nil {
+			return fmt.Errorf("marshal client config for %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(outDir, name+".client.yaml"), data, 0644); err != nil {
 			return fmt.Errorf("write client config for %s: %w", name, err)
 		}
 		fmt.Printf("  %s.client.yaml\n", name)
@@ -184,17 +170,17 @@ func Autogen(path string) error {
 	return nil
 }
 
-func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*autogenNodeKeys) *ControllerConfigFile {
+func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*autogenNodeKeys) *ControllerConfig {
 	k := keys[name]
-	cfg := DefaultControllerConfig
+	cfg := cloneControllerConfig(&DefaultControllerConfig)
 
-	cfg.PrivateKey = base64.StdEncoding.EncodeToString(k.Priv[:])
-	cfg.PublicKey = base64.StdEncoding.EncodeToString(k.Pub[:])
+	cfg.PrivateKey = k.Priv
 
 	// AF settings from this node's AFs
-	cfg.AFSettings = make(map[string]*ControllerAFConfigFile)
+	cfg.AFSettings = make(map[types.AFName]*ControllerAFConfig)
 	for afName, af := range ag.Nodes[name] {
-		afCfg := &ControllerAFConfigFile{
+		afCfg := &ControllerAFConfig{
+			Name:              types.AFName(afName),
 			Enable:            true,
 			CommunicationPort: ag.CommunicationPort,
 			VxlanVNI:          ag.VxlanVNI,
@@ -205,9 +191,9 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 		if af.IsAutoIP() {
 			afCfg.AutoIPInterface = af.Bind
 		} else {
-			afCfg.BindAddr = af.Bind
+			afCfg.BindAddr = netip.MustParseAddr(af.Bind)
 		}
-		cfg.AFSettings[afName] = afCfg
+		cfg.AFSettings[types.AFName(afName)] = afCfg
 	}
 
 	// WebUI config
@@ -216,15 +202,15 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 		if bindAddr == "" {
 			bindAddr = ":8080"
 		}
-		cfg.WebUI = &WebUIConfigFile{
+		cfg.WebUI = &WebUIConfig{
 			BindAddr: bindAddr,
 			Title:    ag.WebUI.Title,
 			URL:      ag.WebUI.URL,
 		}
 		if len(ag.WebUI.Nodes) > 0 {
-			cfg.WebUI.Nodes = make(map[string]*WebUINodeFile, len(ag.WebUI.Nodes))
+			cfg.WebUI.Nodes = make(map[string]*WebUINode, len(ag.WebUI.Nodes))
 			for nodeName, n := range ag.WebUI.Nodes {
-				cfg.WebUI.Nodes[nodeName] = &WebUINodeFile{
+				cfg.WebUI.Nodes[nodeName] = &WebUINode{
 					Label: n.Label,
 					Pos:   n.Pos,
 				}
@@ -236,21 +222,19 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 	cfg.AllowedClients = nil
 	for _, clientName := range ag.Clients {
 		ck := keys[clientName]
-		pc := PerClientConfigFile{
-			ClientID:   base64.StdEncoding.EncodeToString(ck.Pub[:]),
+		pc := types.PerClientConfig{
+			ClientID:   types.ClientID(ck.Pub),
 			ClientName: clientName,
 		}
-		// Same-node client: connects via LAN IP, but controller should distribute
-		// the public IP/hostname to other clients. Only needed when client == controller node.
 		if clientName == name {
 			for afName, af := range ag.Nodes[clientName] {
 				if af.DDNS == "" {
 					continue
 				}
 				if pc.AFSettings == nil {
-					pc.AFSettings = make(map[string]*types.PerClientAFConfig)
+					pc.AFSettings = make(map[types.AFName]*types.PerClientAFConfig)
 				}
-				pc.AFSettings[afName] = &types.PerClientAFConfig{
+				pc.AFSettings[types.AFName(afName)] = &types.PerClientAFConfig{
 					EndpointOverride: af.DDNS,
 				}
 			}
@@ -258,15 +242,14 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 		cfg.AllowedClients = append(cfg.AllowedClients, pc)
 	}
 
-	return &cfg
+	return cfg
 }
 
-func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogenNodeKeys) *ClientConfigFile {
+func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogenNodeKeys) *ClientConfig {
 	k := keys[name]
-	cfg := DefaultClientConfig
+	cfg := cloneClientConfig(&DefaultClientConfig)
 
-	cfg.PrivateKey = base64.StdEncoding.EncodeToString(k.Priv[:])
-	cfg.PublicKey = base64.StdEncoding.EncodeToString(k.Pub[:])
+	cfg.PrivateKey = k.Priv
 	cfg.BridgeName = ag.BridgeName
 	if ag.ClampMSSToMTU != nil {
 		cfg.ClampMSSToMTU = *ag.ClampMSSToMTU
@@ -276,9 +259,10 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 	}
 
 	// AF settings from this node's AFs
-	cfg.AFSettings = make(map[string]*ClientAFConfigFile)
+	cfg.AFSettings = make(map[types.AFName]*ClientAFConfig)
 	for afName, af := range ag.Nodes[name] {
-		afCfg := &ClientAFConfigFile{
+		afCfg := &ClientAFConfig{
+			Name:              types.AFName(afName),
 			Enable:            true,
 			ProbePort:         ag.ProbePort,
 			VxlanName:         ag.VxlanNamePrefix + afName,
@@ -288,12 +272,12 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			VxlanSrcPortStart: ag.VxlanSrcPortStart,
 			VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
 			Priority:          ag.Priority,
-			ForwardCost:    ag.ForwardCost,
+			ForwardCost:       ag.ForwardCost,
 		}
 		if af.IsAutoIP() {
 			afCfg.AutoIPInterface = af.Bind
 		} else {
-			afCfg.BindAddr = af.Bind
+			afCfg.BindAddr = netip.MustParseAddr(af.Bind)
 		}
 
 		// Add controllers that have this AF
@@ -302,7 +286,6 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			if !ok {
 				continue
 			}
-			// Same node: connect via bind addr (LAN); different node: use ddns/endpoint
 			var addr string
 			if ctrlName == name {
 				addr = ctrlAF.Bind
@@ -310,30 +293,22 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 				addr, _ = ctrlAF.Endpoint() // already validated
 			}
 			ck := keys[ctrlName]
-			afCfg.Controllers = append(afCfg.Controllers, ControllerEndpointFile{
-				PubKey: base64.StdEncoding.EncodeToString(ck.Pub[:]),
-				Addr:   formatAddrPort(addr, ag.CommunicationPort),
+			ap, _ := netip.ParseAddrPort(formatAddrPort(addr, ag.CommunicationPort))
+			afCfg.Controllers = append(afCfg.Controllers, ControllerEndpoint{
+				PubKey: ck.Pub,
+				Addr:   ap,
 			})
 		}
 
-		cfg.AFSettings[afName] = afCfg
+		cfg.AFSettings[types.AFName(afName)] = afCfg
 	}
 
-	return &cfg
+	return cfg
 }
 
 func formatAddrPort(host string, port uint16) string {
-	// If it's an IPv6 address, wrap in brackets
 	if addr, err := netip.ParseAddr(host); err == nil && addr.Is6() {
 		return fmt.Sprintf("[%s]:%d", host, port)
 	}
 	return fmt.Sprintf("%s:%d", host, port)
-}
-
-func writeYAML(path string, v interface{}) error {
-	data, err := yaml.Marshal(v)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
 }

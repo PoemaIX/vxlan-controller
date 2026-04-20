@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"os"
@@ -13,63 +12,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
-
-type ControllerConfigFile struct {
-	PrivateKey             string                              `yaml:"private_key"`
-	PublicKey              string                              `yaml:"public_key,omitempty"`
-	AFSettings             map[string]*ControllerAFConfigFile  `yaml:"address_families"`
-	ClientOfflineTimeout   int                                 `yaml:"client_offline_timeout"`
-	SyncNewClientDebounce  int                                 `yaml:"sync_new_client_debounce"`
-	SyncNewClientDebounceMax int                               `yaml:"sync_new_client_debounce_max"`
-	TopologyUpdateDebounce int                                 `yaml:"topology_update_debounce"`
-	TopologyUpdateDebounceMax int                              `yaml:"topology_update_debounce_max"`
-	Probing                ProbingConfigFile                   `yaml:"probing"`
-	AllowedClients         []PerClientConfigFile               `yaml:"allowed_clients"`
-	LogLevel               string                             `yaml:"log_level"`
-	WebUI                  *WebUIConfigFile                    `yaml:"web_ui"`
-	CostMode               string                             `yaml:"cost_mode"`
-	StaticCosts            map[string]map[string]map[string]float64 `yaml:"static_costs"`
-	APISocket              string                             `yaml:"api_socket"`
-}
-
-type WebUIConfigFile struct {
-	BindAddr   string                       `yaml:"bind_addr"`
-	Title      string                       `yaml:"title"`
-	URL        string                       `yaml:"url"`
-	MacAliases map[string]string            `yaml:"mac_aliases"`
-	Nodes      map[string]*WebUINodeFile    `yaml:"nodes"`
-}
-
-type WebUINodeFile struct {
-	Label string     `yaml:"label"`
-	Pos   [2]float64 `yaml:"pos"`
-}
-
-type ControllerAFConfigFile struct {
-	Enable            bool   `yaml:"enable"`
-	BindAddr          string `yaml:"bind_addr"`
-	AutoIPInterface   string `yaml:"autoip_interface"`
-	AddrSelect        string `yaml:"addr_select"`
-	CommunicationPort uint16 `yaml:"communication_port"`
-	VxlanVNI          uint32 `yaml:"vxlan_vni"`
-	VxlanDstPort      uint16 `yaml:"vxlan_dst_port"`
-	VxlanSrcPortStart uint16 `yaml:"vxlan_src_port_start"`
-	VxlanSrcPortEnd   uint16 `yaml:"vxlan_src_port_end"`
-}
-
-type ProbingConfigFile struct {
-	ProbeIntervalS    int `yaml:"probe_interval_s"`
-	ProbeTimes        int `yaml:"probe_times"`
-	InProbeIntervalMs int `yaml:"in_probe_interval_ms"`
-	ProbeTimeoutMs    int `yaml:"probe_timeout_ms"`
-}
-
-type PerClientConfigFile struct {
-	ClientID   string                                `yaml:"client_id"`
-	ClientName string                                `yaml:"client_name"`
-	Filters    *filter.FilterConfigFile              `yaml:"filters"`
-	AFSettings map[string]*types.PerClientAFConfig   `yaml:"af_settings,omitempty"`
-}
 
 // ControllerConfig is the parsed controller configuration.
 type ControllerConfig struct {
@@ -91,16 +33,16 @@ type ControllerConfig struct {
 }
 
 type WebUIConfig struct {
-	BindAddr   string
-	Title      string
-	URL        string
-	MacAliases map[string]string
-	Nodes      map[string]*WebUINode
+	BindAddr   string                `yaml:"bind_addr"`
+	Title      string                `yaml:"title"`
+	URL        string                `yaml:"url"`
+	MacAliases map[string]string     `yaml:"mac_aliases"`
+	Nodes      map[string]*WebUINode `yaml:"nodes"`
 }
 
 type WebUINode struct {
-	Label string
-	Pos   [2]float64
+	Label string     `yaml:"label"`
+	Pos   [2]float64 `yaml:"pos"`
 }
 
 type ControllerAFConfig struct {
@@ -117,150 +59,141 @@ type ControllerAFConfig struct {
 }
 
 type ProbingConfig struct {
-	ProbeIntervalS    int
-	ProbeTimes        int
-	InProbeIntervalMs int
-	ProbeTimeoutMs    int
+	ProbeIntervalS    int `yaml:"probe_interval_s"`
+	ProbeTimes        int `yaml:"probe_times"`
+	InProbeIntervalMs int `yaml:"in_probe_interval_ms"`
+	ProbeTimeoutMs    int `yaml:"probe_timeout_ms"`
 }
 
-func LoadControllerConfig(path string) (*ControllerConfig, error) {
+func LoadControllerConfig(path string) (*ControllerConfig, []DefaultApplied, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, nil, fmt.Errorf("read config: %w", err)
 	}
 	configDir := filepath.Dir(path)
 
-	// Start from defaults, then overlay user config
-	raw := DefaultControllerConfig
-	raw.AFSettings = nil      // clear so user must specify
-	raw.AllowedClients = nil  // clear so user must specify
-	// Deep-clone pointer defaults so yaml.Unmarshal doesn't mutate the global.
-	if raw.WebUI != nil {
-		w := *raw.WebUI
-		raw.WebUI = &w
-	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse yaml: %w", err)
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, nil, fmt.Errorf("parse yaml: %w", err)
 	}
 
-	cfg := &ControllerConfig{
-		ClientOfflineTimeout:      time.Duration(raw.ClientOfflineTimeout) * time.Second,
-		SyncNewClientDebounce:     time.Duration(raw.SyncNewClientDebounce) * time.Second,
-		SyncNewClientDebounceMax:  time.Duration(raw.SyncNewClientDebounceMax) * time.Second,
-		TopologyUpdateDebounce:    time.Duration(raw.TopologyUpdateDebounce) * time.Second,
-		TopologyUpdateDebounceMax: time.Duration(raw.TopologyUpdateDebounceMax) * time.Second,
-		LogLevel:                  raw.LogLevel,
-		Probing: ProbingConfig{
-			ProbeIntervalS:    raw.Probing.ProbeIntervalS,
-			ProbeTimes:        raw.Probing.ProbeTimes,
-			InProbeIntervalMs: raw.Probing.InProbeIntervalMs,
-			ProbeTimeoutMs:    raw.Probing.ProbeTimeoutMs,
-		},
+	m := nodeMap(&doc)
+	if m == nil {
+		return nil, nil, fmt.Errorf("config must be a YAML mapping")
 	}
 
-	// CostMode
-	cfg.CostMode = raw.CostMode
-	if cfg.CostMode != "probe" && cfg.CostMode != "static" {
-		return nil, fmt.Errorf("invalid cost_mode %q (must be probe or static)", cfg.CostMode)
-	}
-
-	cfg.APISocket = raw.APISocket
+	dt := newDefaultTracker()
+	cfg := cloneControllerConfig(&DefaultControllerConfig)
+	cfg.AFSettings = nil
+	cfg.AllowedClients = nil
 	cfg.ConfigPath = path
 
-	// Parse private key
-	keyBytes, err := base64.StdEncoding.DecodeString(raw.PrivateKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid private_key base64: %w", err)
+	// Scalar fields
+	if err := trackedSet(&cfg.LogLevel, m, "log_level", dt); err != nil {
+		return nil, nil, err
 	}
-	if len(keyBytes) != 32 {
-		return nil, fmt.Errorf("private_key must be 32 bytes, got %d", len(keyBytes))
+	if err := trackedSet(&cfg.CostMode, m, "cost_mode", dt); err != nil {
+		return nil, nil, err
 	}
-	copy(cfg.PrivateKey[:], keyBytes)
+	if err := trackedSet(&cfg.APISocket, m, "api_socket", dt); err != nil {
+		return nil, nil, err
+	}
 
-	// Parse AF settings
-	cfg.AFSettings = make(map[types.AFName]*ControllerAFConfig)
-	for name, afRaw := range raw.AFSettings {
-		afName := types.AFName(name)
-		af := &ControllerAFConfig{
-			Name:              afName,
-			Enable:            afRaw.Enable,
-			CommunicationPort: afRaw.CommunicationPort,
-			VxlanVNI:          afRaw.VxlanVNI,
-			VxlanDstPort:      afRaw.VxlanDstPort,
-			VxlanSrcPortStart: afRaw.VxlanSrcPortStart,
-			VxlanSrcPortEnd:   afRaw.VxlanSrcPortEnd,
+	if cfg.CostMode != "probe" && cfg.CostMode != "static" {
+		return nil, nil, fmt.Errorf("invalid cost_mode %q (must be probe or static)", cfg.CostMode)
+	}
+
+	// Duration fields
+	if err := trackedSetDuration(&cfg.ClientOfflineTimeout, m, "client_offline_timeout", time.Second, dt); err != nil {
+		return nil, nil, err
+	}
+	if err := trackedSetDuration(&cfg.SyncNewClientDebounce, m, "sync_new_client_debounce", time.Second, dt); err != nil {
+		return nil, nil, err
+	}
+	if err := trackedSetDuration(&cfg.SyncNewClientDebounceMax, m, "sync_new_client_debounce_max", time.Second, dt); err != nil {
+		return nil, nil, err
+	}
+	if err := trackedSetDuration(&cfg.TopologyUpdateDebounce, m, "topology_update_debounce", time.Second, dt); err != nil {
+		return nil, nil, err
+	}
+	if err := trackedSetDuration(&cfg.TopologyUpdateDebounceMax, m, "topology_update_debounce_max", time.Second, dt); err != nil {
+		return nil, nil, err
+	}
+
+	// Probing (simple struct — track individual fields)
+	probDt := dt.sub("probing")
+	if n, ok := m["probing"]; ok {
+		pm := nodeMap(n)
+		if err := trackedSet(&cfg.Probing.ProbeIntervalS, pm, "probe_interval_s", probDt); err != nil {
+			return nil, nil, err
 		}
-
-		hasBindAddr := afRaw.BindAddr != ""
-		hasAutoIP := afRaw.AutoIPInterface != ""
-
-		if hasBindAddr && hasAutoIP {
-			return nil, fmt.Errorf("af %s: bind_addr and autoip_interface are mutually exclusive", name)
+		if err := trackedSet(&cfg.Probing.ProbeTimes, pm, "probe_times", probDt); err != nil {
+			return nil, nil, err
 		}
-		if !hasBindAddr && !hasAutoIP {
-			return nil, fmt.Errorf("af %s: either bind_addr or autoip_interface must be set", name)
+		if err := trackedSet(&cfg.Probing.InProbeIntervalMs, pm, "in_probe_interval_ms", probDt); err != nil {
+			return nil, nil, err
 		}
+		if err := trackedSet(&cfg.Probing.ProbeTimeoutMs, pm, "probe_timeout_ms", probDt); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		probDt.record("probe_interval_s", cfg.Probing.ProbeIntervalS)
+		probDt.record("probe_times", cfg.Probing.ProbeTimes)
+		probDt.record("in_probe_interval_ms", cfg.Probing.InProbeIntervalMs)
+		probDt.record("probe_timeout_ms", cfg.Probing.ProbeTimeoutMs)
+	}
 
-		if hasAutoIP {
-			af.AutoIPInterface = afRaw.AutoIPInterface
-			script, err := resolveAddrSelect(afRaw.AddrSelect, name)
+	// Private key (not tracked — required field)
+	if err := nodeSetBase64Key32(&cfg.PrivateKey, m, "private_key"); err != nil {
+		return nil, nil, err
+	}
+
+	// AF settings
+	if afNode, ok := m["address_families"]; ok {
+		cfg.AFSettings = make(map[types.AFName]*ControllerAFConfig)
+		afMap := nodeMap(afNode)
+		for name, afValueNode := range afMap {
+			afDt := dt.sub("address_families." + name)
+			af, err := overlayControllerAF(name, afValueNode, afDt)
 			if err != nil {
-				return nil, fmt.Errorf("af %s: %w", name, err)
+				return nil, nil, fmt.Errorf("af %s: %w", name, err)
 			}
-			af.AddrSelectScript = script
-		} else {
-			af.BindAddr, err = netip.ParseAddr(afRaw.BindAddr)
+			cfg.AFSettings[types.AFName(name)] = af
+		}
+	}
+
+	// Allowed clients (not tracked — required field)
+	if clientsNode, ok := m["allowed_clients"]; ok && clientsNode.Kind == yaml.SequenceNode {
+		for _, cNode := range clientsNode.Content {
+			pc, err := decodePerClient(cNode, configDir)
 			if err != nil {
-				return nil, fmt.Errorf("af %s: invalid bind_addr: %w", name, err)
+				return nil, nil, err
 			}
+			cfg.AllowedClients = append(cfg.AllowedClients, pc)
 		}
-
-		cfg.AFSettings[afName] = af
 	}
 
-	// Parse allowed clients
-	for _, clientRaw := range raw.AllowedClients {
-		pc := types.PerClientConfig{
-			ClientName: clientRaw.ClientName,
-			Filters:    filter.ParseFilterConfigFile(clientRaw.Filters, configDir),
+	// Static costs
+	if costsNode, ok := m["static_costs"]; ok {
+		var rawCosts map[string]map[string]map[string]float64
+		if err := costsNode.Decode(&rawCosts); err != nil {
+			return nil, nil, fmt.Errorf("static_costs: %w", err)
 		}
 
-		pubBytes, err := base64.StdEncoding.DecodeString(clientRaw.ClientID)
-		if err != nil {
-			return nil, fmt.Errorf("client %s: invalid client_id base64: %w", clientRaw.ClientName, err)
-		}
-		if len(pubBytes) != 32 {
-			return nil, fmt.Errorf("client %s: client_id must be 32 bytes", clientRaw.ClientName)
-		}
-		copy(pc.ClientID[:], pubBytes)
-
-		// Parse per-AF client settings
-		if len(clientRaw.AFSettings) > 0 {
-			pc.AFSettings = make(map[types.AFName]*types.PerClientAFConfig, len(clientRaw.AFSettings))
-			for afStr, afCfg := range clientRaw.AFSettings {
-				pc.AFSettings[types.AFName(afStr)] = afCfg
-			}
-		}
-
-		cfg.AllowedClients = append(cfg.AllowedClients, pc)
-	}
-
-	// Parse static costs (name-indexed -> name-indexed with AFName keys)
-	if len(raw.StaticCosts) > 0 {
-		// Build name set for validation
 		nameSet := make(map[string]bool)
 		for _, pc := range cfg.AllowedClients {
 			nameSet[pc.ClientName] = true
 		}
+
 		cfg.StaticCosts = make(map[string]map[string]map[types.AFName]float64)
-		for src, dsts := range raw.StaticCosts {
+		for src, dsts := range rawCosts {
 			if !nameSet[src] {
-				return nil, fmt.Errorf("static_costs: unknown client name %q", src)
+				return nil, nil, fmt.Errorf("static_costs: unknown client name %q", src)
 			}
 			cfg.StaticCosts[src] = make(map[string]map[types.AFName]float64)
 			for dst, afs := range dsts {
 				if !nameSet[dst] {
-					return nil, fmt.Errorf("static_costs: unknown client name %q", dst)
+					return nil, nil, fmt.Errorf("static_costs: unknown client name %q", dst)
 				}
 				cfg.StaticCosts[src][dst] = make(map[types.AFName]float64)
 				for af, cost := range afs {
@@ -270,25 +203,138 @@ func LoadControllerConfig(path string) (*ControllerConfig, error) {
 		}
 	}
 
-	// Parse WebUI config
-	if raw.WebUI != nil && raw.WebUI.BindAddr != "" {
-		wui := &WebUIConfig{
-			BindAddr:   raw.WebUI.BindAddr,
-			Title:      raw.WebUI.Title,
-			URL:        raw.WebUI.URL,
-			MacAliases: raw.WebUI.MacAliases,
+	// WebUI
+	if wNode, ok := m["web_ui"]; ok {
+		var wui WebUIConfig
+		if err := wNode.Decode(&wui); err != nil {
+			return nil, nil, fmt.Errorf("web_ui: %w", err)
 		}
-		if len(raw.WebUI.Nodes) > 0 {
-			wui.Nodes = make(map[string]*WebUINode, len(raw.WebUI.Nodes))
-			for name, n := range raw.WebUI.Nodes {
-				wui.Nodes[name] = &WebUINode{
-					Label: n.Label,
-					Pos:   n.Pos,
-				}
-			}
+		if wui.BindAddr != "" {
+			cfg.WebUI = &wui
 		}
-		cfg.WebUI = wui
 	}
 
-	return cfg, nil
+	return cfg, dt.result(), nil
+}
+
+func overlayControllerAF(name string, node *yaml.Node, dt *defaultTracker) (*ControllerAFConfig, error) {
+	afName := types.AFName(name)
+
+	var base *ControllerAFConfig
+	if def, ok := DefaultControllerConfig.AFSettings[afName]; ok {
+		clone := *def
+		base = &clone
+	} else {
+		for _, def := range DefaultControllerConfig.AFSettings {
+			clone := *def
+			base = &clone
+			break
+		}
+	}
+	if base == nil {
+		base = &ControllerAFConfig{}
+	}
+	base.Name = afName
+
+	m := nodeMap(node)
+
+	if err := trackedSet(&base.Enable, m, "enable", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.CommunicationPort, m, "communication_port", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.VxlanVNI, m, "vxlan_vni", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.VxlanDstPort, m, "vxlan_dst_port", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.VxlanSrcPortStart, m, "vxlan_src_port_start", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.VxlanSrcPortEnd, m, "vxlan_src_port_end", dt); err != nil {
+		return nil, err
+	}
+
+	// bind_addr vs autoip_interface
+	bindStr, hasBind := nodeString(m, "bind_addr")
+	autoIP, hasAutoIP := nodeString(m, "autoip_interface")
+
+	if hasBind && hasAutoIP {
+		return nil, fmt.Errorf("bind_addr and autoip_interface are mutually exclusive")
+	}
+	if hasBind {
+		addr, err := netip.ParseAddr(bindStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid bind_addr: %w", err)
+		}
+		base.BindAddr = addr
+		base.AutoIPInterface = ""
+	} else if hasAutoIP {
+		base.AutoIPInterface = autoIP
+		addrSelectStr, _ := nodeString(m, "addr_select")
+		script, err := resolveAddrSelect(addrSelectStr, name)
+		if err != nil {
+			return nil, err
+		}
+		base.AddrSelectScript = script
+		base.BindAddr = netip.Addr{}
+	} else if !base.BindAddr.IsValid() && base.AutoIPInterface == "" {
+		return nil, fmt.Errorf("either bind_addr or autoip_interface must be set")
+	} else if base.BindAddr.IsValid() {
+		dt.record("bind_addr", base.BindAddr)
+	}
+
+	return base, nil
+}
+
+func decodePerClient(node *yaml.Node, configDir string) (types.PerClientConfig, error) {
+	m := nodeMap(node)
+	pc := types.PerClientConfig{}
+
+	if err := nodeSet(&pc.ClientName, m, "client_name"); err != nil {
+		return pc, err
+	}
+
+	if err := nodeSetBase64Key32((*[32]byte)(&pc.ClientID), m, "client_id"); err != nil {
+		return pc, fmt.Errorf("client %s: %w", pc.ClientName, err)
+	}
+
+	// Filters
+	if n, ok := m["filters"]; ok {
+		pc.Filters = filter.ParseFilterNode(n, configDir)
+	}
+
+	// Per-AF settings
+	if afNode, ok := m["af_settings"]; ok {
+		var raw map[string]*types.PerClientAFConfig
+		if err := afNode.Decode(&raw); err != nil {
+			return pc, fmt.Errorf("client %s: af_settings: %w", pc.ClientName, err)
+		}
+		if len(raw) > 0 {
+			pc.AFSettings = make(map[types.AFName]*types.PerClientAFConfig, len(raw))
+			for afStr, afCfg := range raw {
+				pc.AFSettings[types.AFName(afStr)] = afCfg
+			}
+		}
+	}
+
+	return pc, nil
+}
+
+func cloneControllerConfig(src *ControllerConfig) *ControllerConfig {
+	dst := *src
+	if src.AFSettings != nil {
+		dst.AFSettings = make(map[types.AFName]*ControllerAFConfig, len(src.AFSettings))
+		for k, v := range src.AFSettings {
+			clone := *v
+			dst.AFSettings[k] = &clone
+		}
+	}
+	if src.AllowedClients != nil {
+		dst.AllowedClients = make([]types.PerClientConfig, len(src.AllowedClients))
+		copy(dst.AllowedClients, src.AllowedClients)
+	}
+	return &dst
 }
