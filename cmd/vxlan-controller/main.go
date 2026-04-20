@@ -92,7 +92,7 @@ func runController(configPath string, defaultConfig, mockMode bool, logLevel str
 		configPath = "controller.yaml"
 	}
 
-	cfg, err := config.LoadControllerConfig(configPath)
+	cfg, defaults, err := config.LoadControllerConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -101,6 +101,10 @@ func runController(configPath string, defaultConfig, mockMode bool, logLevel str
 		vlog.SetLevel(vlog.ParseLevel(logLevel))
 	} else if cfg.LogLevel != "" {
 		vlog.SetLevel(vlog.ParseLevel(cfg.LogLevel))
+	}
+
+	for _, d := range defaults {
+		vlog.Warnf("[Config] %s applied default value %s", d.Path, d.Value)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -145,7 +149,7 @@ func runClient(configPath string, defaultConfig bool, logLevel string) {
 		configPath = "client.yaml"
 	}
 
-	cfg, err := config.LoadClientConfig(configPath)
+	cfg, defaults, err := config.LoadClientConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -154,6 +158,10 @@ func runClient(configPath string, defaultConfig bool, logLevel string) {
 		vlog.SetLevel(vlog.ParseLevel(logLevel))
 	} else if cfg.LogLevel != "" {
 		vlog.SetLevel(vlog.ParseLevel(cfg.LogLevel))
+	}
+
+	for _, d := range defaults {
+		vlog.Warnf("[Config] %s applied default value %s", d.Path, d.Value)
 	}
 
 	cl := client.New(cfg)

@@ -1,14 +1,14 @@
 package config
 
 import (
-	"encoding/base64"
+	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"vxlan-controller/pkg/crypto"
 	"vxlan-controller/pkg/filter"
-
-	"gopkg.in/yaml.v3"
+	"vxlan-controller/pkg/types"
 )
 
 // resolveAddrSelect resolves an addr_select value to Lua script content.
@@ -33,19 +33,41 @@ func resolveAddrSelect(addrSelect, afName string) (string, error) {
 }
 
 func DefaultClientConfigYAML() ([]byte, error) {
-	cfg := DefaultClientConfig
+	cfg := cloneClientConfig(&DefaultClientConfig)
 	priv, pub := crypto.GenerateKeyPair()
-	cfg.PrivateKey = base64.StdEncoding.EncodeToString(priv[:])
-	cfg.PublicKey = base64.StdEncoding.EncodeToString(pub[:])
-	return yaml.Marshal(&cfg)
+	cfg.PrivateKey = priv
+
+	// Add placeholder controllers for the generated YAML
+	for _, af := range cfg.AFSettings {
+		af.Controllers = []ControllerEndpoint{
+			{PubKey: pub, Addr: placeholderAddrPort(af.BindAddr)},
+		}
+	}
+
+	return MarshalClientConfig(cfg)
 }
 
 func DefaultControllerConfigYAML() ([]byte, error) {
-	cfg := DefaultControllerConfig
+	cfg := cloneControllerConfig(&DefaultControllerConfig)
 	priv, pub := crypto.GenerateKeyPair()
-	cfg.PrivateKey = base64.StdEncoding.EncodeToString(priv[:])
-	cfg.PublicKey = base64.StdEncoding.EncodeToString(pub[:])
-	return yaml.Marshal(&cfg)
+	cfg.PrivateKey = priv
+
+	cfg.AllowedClients = []types.PerClientConfig{
+		{ClientID: types.ClientID(pub), ClientName: "node-1"},
+	}
+
+	cfg.WebUI = &WebUIConfig{
+		Title: "<b>VXLAN</b> Controller",
+	}
+
+	return MarshalControllerConfig(cfg)
+}
+
+func placeholderAddrPort(bindAddr netip.Addr) netip.AddrPort {
+	if bindAddr.Is6() {
+		return netip.MustParseAddrPort("[fd00::1]:5000")
+	}
+	return netip.MustParseAddrPort("192.168.1.1:5000")
 }
 
 var DefaultNTPServers = []string{
@@ -65,27 +87,26 @@ const (
 	DefaultClientSocket     = "/var/run/vxlan-client.sock"
 )
 
-var DefaultClientConfig = ClientConfigFile{
-	PrivateKey:         "<base64 private key from: wg genkey>",
+var DefaultClientConfig = ClientConfig{
 	BridgeName:         "br-vxlan",
 	ClampMSSToMTU:      false,
 	ClampMSSTable:      "vxlan_mss",
 	NeighSuppress:      false,
 	VxlanFirewall:      false,
 	VxlanFirewallTable: "vxlan_fw",
-	InitTimeout:        10,
-	StatsIntervalS:     5,
+	InitTimeout:        10 * time.Second,
+	StatsInterval:      5 * time.Second,
 	ProbeWindowSize:    15,
 	AFSwitchCost:       20,
 	NTPServers:         DefaultNTPServers,
-	NTPPeriodH:         23,
-	NTPRTTThresholdMs:  50,
-	AFSettings: map[string]*ClientAFConfigFile{
+	NTPPeriod:          23 * time.Hour,
+	NTPRTTThreshold:    50 * time.Millisecond,
+	SyncCheckMaxDelay:  10,
+	AFSettings: map[types.AFName]*ClientAFConfig{
 		"v4": {
 			Enable:            true,
-			BindAddr:          "0.0.0.0",
+			BindAddr:          netip.MustParseAddr("0.0.0.0"),
 			ProbePort:         5010,
-			CommunicationPort: 0,
 			VxlanName:         "vxlan-v4",
 			VxlanVNI:          100,
 			VxlanMTU:          1400,
@@ -94,15 +115,11 @@ var DefaultClientConfig = ClientConfigFile{
 			VxlanSrcPortEnd:   4789,
 			Priority:          10,
 			ForwardCost:       20,
-			Controllers: []ControllerEndpointFile{
-				{PubKey: "<base64 controller pubkey from: wg pubkey>", Addr: "192.168.1.1:5000"},
-			},
 		},
 		"v6": {
 			Enable:            false,
-			BindAddr:          "::",
+			BindAddr:          netip.MustParseAddr("::"),
 			ProbePort:         5010,
-			CommunicationPort: 0,
 			VxlanName:         "vxlan-v6",
 			VxlanVNI:          100,
 			VxlanMTU:          1400,
@@ -111,31 +128,27 @@ var DefaultClientConfig = ClientConfigFile{
 			VxlanSrcPortEnd:   4789,
 			Priority:          10,
 			ForwardCost:       20,
-			Controllers: []ControllerEndpointFile{
-				{PubKey: "<base64 controller pubkey from: wg pubkey>", Addr: "[fd00::1]:5000"},
-			},
 		},
 	},
 }
 
-var DefaultControllerConfig = ControllerConfigFile{
-	PrivateKey:                "<base64 private key from: wg genkey>",
+var DefaultControllerConfig = ControllerConfig{
 	CostMode:                  "probe",
-	ClientOfflineTimeout:      30,
-	SyncNewClientDebounce:     3,
-	SyncNewClientDebounceMax:  10,
-	TopologyUpdateDebounce:    3,
-	TopologyUpdateDebounceMax: 7,
-	Probing: ProbingConfigFile{
+	ClientOfflineTimeout:      30 * time.Second,
+	SyncNewClientDebounce:     3 * time.Second,
+	SyncNewClientDebounceMax:  10 * time.Second,
+	TopologyUpdateDebounce:    3 * time.Second,
+	TopologyUpdateDebounceMax: 7 * time.Second,
+	Probing: ProbingConfig{
 		ProbeIntervalS:    5,
 		ProbeTimes:        5,
 		InProbeIntervalMs: 200,
 		ProbeTimeoutMs:    1000,
 	},
-	AFSettings: map[string]*ControllerAFConfigFile{
+	AFSettings: map[types.AFName]*ControllerAFConfig{
 		"v4": {
 			Enable:            true,
-			BindAddr:          "0.0.0.0",
+			BindAddr:          netip.MustParseAddr("0.0.0.0"),
 			CommunicationPort: 5000,
 			VxlanVNI:          100,
 			VxlanDstPort:      4789,
@@ -144,21 +157,12 @@ var DefaultControllerConfig = ControllerConfigFile{
 		},
 		"v6": {
 			Enable:            false,
-			BindAddr:          "::",
+			BindAddr:          netip.MustParseAddr("::"),
 			CommunicationPort: 5000,
 			VxlanVNI:          100,
 			VxlanDstPort:      4789,
 			VxlanSrcPortStart: 4789,
 			VxlanSrcPortEnd:   4789,
 		},
-	},
-	AllowedClients: []PerClientConfigFile{
-		{
-			ClientID:   "<base64 client pubkey from: wg pubkey>",
-			ClientName: "node-1",
-		},
-	},
-	WebUI: &WebUIConfigFile{
-		Title: "<b>VXLAN</b> Controller",
 	},
 }
