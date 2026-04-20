@@ -258,8 +258,10 @@ func overlayControllerAF(name string, node *yaml.Node, dt *defaultTracker) (*Con
 	}
 
 	// bind_addr vs autoip_interface
-	bindStr, hasBind := nodeString(m, "bind_addr")
-	autoIP, hasAutoIP := nodeString(m, "autoip_interface")
+	bindStr, _ := nodeString(m, "bind_addr")
+	autoIP, _ := nodeString(m, "autoip_interface")
+	hasBind := bindStr != ""
+	hasAutoIP := autoIP != ""
 
 	if hasBind && hasAutoIP {
 		return nil, fmt.Errorf("bind_addr and autoip_interface are mutually exclusive")
