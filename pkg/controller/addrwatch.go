@@ -13,45 +13,60 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// resolveInitialBindAddr runs addr selection once for a controller AF.
-func (c *Controller) resolveInitialBindAddr(af types.AFName) {
-	afCfg := c.Config.AFSettings[af]
-	engine := c.addrEngines[af]
+// ifaceAFChannel identifies one (af, channel) monitored under an interface.
+type ifaceAFChannel struct {
+	AF      types.AFName
+	Channel types.ChannelName
+}
+
+// resolveInitialBindAddr runs addr selection once for a controller (af, channel).
+func (c *Controller) resolveInitialBindAddr(af types.AFName, ch types.ChannelName) {
+	chans, ok := c.Config.AFSettings[af]
+	if !ok {
+		return
+	}
+	cc, ok := chans[ch]
+	if !ok {
+		return
+	}
+	engine := c.addrEngines[af][ch]
 	if engine == nil {
 		return
 	}
 
-	addrs := filter.GetInterfaceAddrs(afCfg.AutoIPInterface, string(af))
-	selected := engine.Select(addrs, "", afCfg.AutoIPInterface)
+	addrs := filter.GetInterfaceAddrs(cc.AutoIPInterface, string(af))
+	selected := engine.Select(addrs, "", cc.AutoIPInterface)
 	if selected == "" {
-		vlog.Warnf("[AddrWatch] AF=%s: no IP found on interface %s at startup, will retry on events", af, afCfg.AutoIPInterface)
+		vlog.Warnf("[AddrWatch] AF=%s channel=%s: no IP found on interface %s at startup, will retry on events", af, ch, cc.AutoIPInterface)
 		return
 	}
 
 	addr, err := netip.ParseAddr(selected)
 	if err != nil {
-		vlog.Errorf("[AddrWatch] AF=%s: Lua returned invalid IP %q: %v", af, selected, err)
+		vlog.Errorf("[AddrWatch] AF=%s channel=%s: Lua returned invalid IP %q: %v", af, ch, selected, err)
 		return
 	}
 
-	afCfg.BindAddr = addr
-	vlog.Infof("[AddrWatch] AF=%s: initial bind_addr resolved to %s from interface %s", af, addr, afCfg.AutoIPInterface)
+	cc.BindAddr = addr
+	vlog.Infof("[AddrWatch] AF=%s channel=%s: initial bind_addr resolved to %s from interface %s", af, ch, addr, cc.AutoIPInterface)
 }
 
-// addrWatchLoop monitors netlink address and link events for all AFs with AutoIPInterface.
+// addrWatchLoop monitors netlink address and link events for all (af, channel) with AutoIPInterface.
 func (c *Controller) addrWatchLoop() {
-	ifaceAFs := make(map[string][]types.AFName)
-	for af, afCfg := range c.Config.AFSettings {
-		if afCfg.AutoIPInterface != "" {
-			ifaceAFs[afCfg.AutoIPInterface] = append(ifaceAFs[afCfg.AutoIPInterface], af)
+	ifaceMap := make(map[string][]ifaceAFChannel)
+	for af, chans := range c.Config.AFSettings {
+		for ch, cc := range chans {
+			if cc.AutoIPInterface != "" {
+				ifaceMap[cc.AutoIPInterface] = append(ifaceMap[cc.AutoIPInterface], ifaceAFChannel{AF: af, Channel: ch})
+			}
 		}
 	}
-	if len(ifaceAFs) == 0 {
+	if len(ifaceMap) == 0 {
 		return
 	}
 
-	for iface, afs := range ifaceAFs {
-		vlog.Infof("[AddrWatch] monitoring interface %s for AFs: %v", iface, afs)
+	for iface, pairs := range ifaceMap {
+		vlog.Infof("[AddrWatch] monitoring interface %s for (af,channel): %v", iface, pairs)
 	}
 
 	addrCh := make(chan netlink.AddrUpdate)
@@ -89,7 +104,7 @@ func (c *Controller) addrWatchLoop() {
 	}
 
 	linkIndexToName := make(map[int]string)
-	for ifaceName := range ifaceAFs {
+	for ifaceName := range ifaceMap {
 		if link, err := netlink.LinkByName(ifaceName); err == nil {
 			linkIndexToName[link.Attrs().Index] = ifaceName
 		}
@@ -104,7 +119,7 @@ func (c *Controller) addrWatchLoop() {
 			vlog.Debugf("[AddrWatch] addr event: linkIndex=%d newAddr=%v ip=%v", update.LinkIndex, update.NewAddr, update.LinkAddress.IP)
 			ifaceName, found := linkIndexToName[update.LinkIndex]
 			if !found {
-				for name := range ifaceAFs {
+				for name := range ifaceMap {
 					if link, err := netlink.LinkByName(name); err == nil {
 						linkIndexToName[link.Attrs().Index] = name
 						if link.Attrs().Index == update.LinkIndex {
@@ -123,13 +138,13 @@ func (c *Controller) addrWatchLoop() {
 				return
 			}
 			name := update.Attrs().Name
-			if _, monitored := ifaceAFs[name]; monitored {
+			if _, monitored := ifaceMap[name]; monitored {
 				linkIndexToName[update.Attrs().Index] = name
 				triggerDebounce(name)
 			}
 
 		case ifaceName := <-debounceCh:
-			c.handleAddrChange(ifaceName, ifaceAFs[ifaceName])
+			c.handleAddrChange(ifaceName, ifaceMap[ifaceName])
 
 		case <-c.ctx.Done():
 			for _, t := range debounceTimers {
@@ -140,65 +155,84 @@ func (c *Controller) addrWatchLoop() {
 	}
 }
 
-// handleAddrChange processes an address change on an interface for the given AFs.
-func (c *Controller) handleAddrChange(ifaceName string, afs []types.AFName) {
-	for _, af := range afs {
-		engine := c.addrEngines[af]
+// handleAddrChange processes an address change on an interface for the given (af, channel)s.
+func (c *Controller) handleAddrChange(ifaceName string, pairs []ifaceAFChannel) {
+	for _, p := range pairs {
+		af, ch := p.AF, p.Channel
+		engine := c.addrEngines[af][ch]
 		if engine == nil {
 			continue
 		}
 
-		afCfg := c.Config.AFSettings[af]
+		chans, ok := c.Config.AFSettings[af]
+		if !ok {
+			continue
+		}
+		cc, ok := chans[ch]
+		if !ok {
+			continue
+		}
 		addrs := filter.GetInterfaceAddrs(ifaceName, string(af))
 
-		prevIP := afCfg.BindAddr.String()
-		if !afCfg.BindAddr.IsValid() {
+		prevIP := cc.BindAddr.String()
+		if !cc.BindAddr.IsValid() {
 			prevIP = ""
 		}
 
 		selected := engine.Select(addrs, prevIP, ifaceName)
 		if selected == "" {
-			vlog.Debugf("[AddrWatch] AF=%s: no valid IP on %s, ignoring", af, ifaceName)
+			vlog.Debugf("[AddrWatch] AF=%s channel=%s: no valid IP on %s, ignoring", af, ch, ifaceName)
 			continue
 		}
 
 		newAddr, err := netip.ParseAddr(selected)
 		if err != nil {
-			vlog.Errorf("[AddrWatch] AF=%s: Lua returned invalid IP %q: %v", af, selected, err)
+			vlog.Errorf("[AddrWatch] AF=%s channel=%s: Lua returned invalid IP %q: %v", af, ch, selected, err)
 			continue
 		}
 
-		if afCfg.BindAddr == newAddr {
+		if cc.BindAddr == newAddr {
 			continue
 		}
 
-		oldAddr := afCfg.BindAddr
-		vlog.Infof("[AddrWatch] AF=%s: detected IP change on %s: %s -> %s", af, ifaceName, prevIP, newAddr)
+		oldAddr := cc.BindAddr
+		vlog.Infof("[AddrWatch] AF=%s channel=%s: detected IP change on %s: %s -> %s", af, ch, ifaceName, prevIP, newAddr)
 
 		// Update config
-		afCfg.BindAddr = newAddr
+		cc.BindAddr = newAddr
 
 		// Rebind listeners
-		c.rebindAFListener(af, oldAddr, newAddr)
+		c.rebindAFListener(af, ch, oldAddr, newAddr)
 	}
 }
 
 // rebindAFListener closes the old listener and starts a new one on the new address.
-func (c *Controller) rebindAFListener(af types.AFName, oldAddr, newAddr netip.Addr) {
-	afCfg := c.Config.AFSettings[af]
+func (c *Controller) rebindAFListener(af types.AFName, ch types.ChannelName, oldAddr, newAddr netip.Addr) {
+	chans, ok := c.Config.AFSettings[af]
+	if !ok {
+		return
+	}
+	cc, ok := chans[ch]
+	if !ok {
+		return
+	}
 
 	// Close old listener
 	c.mu.Lock()
-	oldAL := c.afListeners[af]
-	if oldAL != nil {
-		oldAL.TCPListener.Close()
-		oldAL.UDPConn.Close()
-		delete(c.afListeners, af)
+	if oldChans, ok := c.afListeners[af]; ok {
+		if oldAL, ok2 := oldChans[ch]; ok2 {
+			oldAL.TCPListener.Close()
+			oldAL.UDPConn.Close()
+			delete(oldChans, ch)
+			if len(oldChans) == 0 {
+				delete(c.afListeners, af)
+			}
+		}
 	}
 	c.mu.Unlock()
 
 	// Retry bind with backoff (IPv6 DAD may delay address availability)
-	bindStr := netip.AddrPortFrom(newAddr, afCfg.CommunicationPort).String()
+	bindStr := netip.AddrPortFrom(newAddr, cc.CommunicationPort).String()
 	var tcpListener net.Listener
 	var udpConn *net.UDPConn
 	var err error
@@ -220,28 +254,33 @@ func (c *Controller) rebindAFListener(af types.AFName, oldAddr, newAddr netip.Ad
 		}
 	}
 	if err != nil {
-		vlog.Errorf("[AddrWatch] AF=%s: failed to rebind on %s after retries: %v", af, bindStr, err)
+		vlog.Errorf("[AddrWatch] AF=%s channel=%s: failed to rebind on %s after retries: %v", af, ch, bindStr, err)
 		return
 	}
 
 	al := &AFListener{
 		AF:          af,
+		Channel:     ch,
 		BindAddr:    newAddr,
-		Port:        afCfg.CommunicationPort,
+		Port:        cc.CommunicationPort,
 		TCPListener: tcpListener,
 		UDPConn:     udpConn,
 		UDPSessions: crypto.NewSessionManager(),
 	}
 
 	c.mu.Lock()
-	c.afListeners[af] = al
+	if _, ok := c.afListeners[af]; !ok {
+		c.afListeners[af] = make(map[types.ChannelName]*AFListener)
+	}
+	c.afListeners[af][ch] = al
 	c.mu.Unlock()
 
-	vlog.Infof("[AddrWatch] AF=%s: rebound listeners on %s", af, bindStr)
+	vlog.Infof("[AddrWatch] AF=%s channel=%s: rebound listeners on %s", af, ch, bindStr)
 
 	go c.tcpAcceptLoop(al)
 	go c.udpReadLoop(al)
 
-	// All existing client connections on this AF will fail on their own
+	// All existing client connections on this (af, channel) will fail on their own
 	// (TCP reads/writes will error out). Clients will reconnect via tcpConnLoop.
+	_ = oldAddr
 }

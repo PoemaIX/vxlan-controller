@@ -310,17 +310,19 @@ probing:
   probe_timeout_ms: 2000
 address_families:
   v4:
-    enable: true
-    bind_addr: "${V4_B}"
-    communication_port: 5000
-    vxlan_vni: ${VNI}
-    vxlan_dst_port: ${DSTPORT}
+    ISP1:
+      enable: true
+      bind_addr: "${V4_B}"
+      communication_port: 5000
+      vxlan_vni: ${VNI}
+      vxlan_dst_port: ${DSTPORT}
   v6:
-    enable: true
-    bind_addr: "${V6_B}"
-    communication_port: 5001
-    vxlan_vni: ${VNI}
-    vxlan_dst_port: ${DSTPORT}
+    ISP1:
+      enable: true
+      bind_addr: "${V6_B}"
+      communication_port: 5001
+      vxlan_vni: ${VNI}
+      vxlan_dst_port: ${DSTPORT}
 allowed_clients:
   - client_id: "${PUB_A}"
     client_name: "node-a"
@@ -344,18 +346,19 @@ init_timeout: 5
 ntp_servers: []
 address_families:
   v4:
-    enable: true
-    bind_addr: "${V4_A}"
-    probe_port: 5010
-    communication_port: 5000
-    vxlan_name: "vxlan-v4"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${MTU}
-    vxlan_dst_port: ${DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_CTRL}"
-        addr: "${V4_B}:5000"
+    ISP1:
+      enable: true
+      bind_addr: "${V4_A}"
+      probe_port: 5010
+      communication_port: 5000
+      vxlan_name: "vxlan-v4-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${MTU}
+      vxlan_dst_port: ${DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_CTRL}"
+          addr: "${V4_B}:5000"
 YAML
 
 # node-b: v4 + v6
@@ -368,31 +371,33 @@ init_timeout: 5
 ntp_servers: []
 address_families:
   v4:
-    enable: true
-    bind_addr: "${V4_B}"
-    probe_port: 5010
-    communication_port: 5000
-    vxlan_name: "vxlan-v4"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${MTU}
-    vxlan_dst_port: ${DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_CTRL}"
-        addr: "${V4_B}:5000"
+    ISP1:
+      enable: true
+      bind_addr: "${V4_B}"
+      probe_port: 5010
+      communication_port: 5000
+      vxlan_name: "vxlan-v4-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${MTU}
+      vxlan_dst_port: ${DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_CTRL}"
+          addr: "${V4_B}:5000"
   v6:
-    enable: true
-    bind_addr: "${V6_B}"
-    probe_port: 5011
-    communication_port: 5001
-    vxlan_name: "vxlan-v6"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${MTU}
-    vxlan_dst_port: ${DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_CTRL}"
-        addr: "[${V6_B}]:5001"
+    ISP1:
+      enable: true
+      bind_addr: "${V6_B}"
+      probe_port: 5011
+      communication_port: 5001
+      vxlan_name: "vxlan-v6-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${MTU}
+      vxlan_dst_port: ${DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_CTRL}"
+          addr: "[${V6_B}]:5001"
 YAML
 
 # node-c: v6 only
@@ -405,18 +410,19 @@ init_timeout: 5
 ntp_servers: []
 address_families:
   v6:
-    enable: true
-    bind_addr: "${V6_C}"
-    probe_port: 5011
-    communication_port: 5001
-    vxlan_name: "vxlan-v6"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${MTU}
-    vxlan_dst_port: ${DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_CTRL}"
-        addr: "[${V6_B}]:5001"
+    ISP1:
+      enable: true
+      bind_addr: "${V6_C}"
+      probe_port: 5011
+      communication_port: 5001
+      vxlan_name: "vxlan-v6-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${MTU}
+      vxlan_dst_port: ${DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_CTRL}"
+          addr: "[${V6_B}]:5001"
 YAML
 
 echo "=== Starting controller (node-b) ==="

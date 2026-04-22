@@ -124,10 +124,10 @@ run_test "rogue -> node-4 ICMP (control plane unaffected)" \
 # --- Section 4: Injection test — firewall OFF (node-4) ---
 echo ""
 echo "  === Injection test: firewall OFF (node-4) ==="
-rx_before=$(get_vxlan_rx "node-4" "vxlan-v4")
+rx_before=$(get_vxlan_rx "node-4" "vxlan-v4-ISP1")
 send_vxlan_inject "${V4_SUBNET}.4" "$VNI"
 sleep 0.5
-rx_after=$(get_vxlan_rx "node-4" "vxlan-v4")
+rx_after=$(get_vxlan_rx "node-4" "vxlan-v4-ISP1")
 
 test_total=$((test_total + 1))
 echo -n "  TEST: rogue VXLAN inject to node-4 (no firewall) reaches vxlan device ... "
@@ -142,14 +142,14 @@ fi
 # --- Section 5: Injection test — firewall ON (node-2) ---
 echo ""
 echo "  === Injection test: firewall ON (node-2) ==="
-rx_before=$(get_vxlan_rx "node-2" "vxlan-v4")
+rx_before=$(get_vxlan_rx "node-2" "vxlan-v4-ISP1")
 drops_before=$(ip netns exec "node-2" nft list table inet vxlan_fw 2>/dev/null \
     | grep -oP 'counter packets \K[0-9]+' | head -1 || echo 0)
 
 send_vxlan_inject "${V4_SUBNET}.2" "$VNI"
 sleep 0.5
 
-rx_after=$(get_vxlan_rx "node-2" "vxlan-v4")
+rx_after=$(get_vxlan_rx "node-2" "vxlan-v4-ISP1")
 drops_after=$(ip netns exec "node-2" nft list table inet vxlan_fw 2>/dev/null \
     | grep -oP 'counter packets \K[0-9]+' | head -1 || echo 0)
 

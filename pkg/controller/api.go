@@ -45,7 +45,7 @@ func (c *Controller) handleAPI(method string, params json.RawMessage) (interface
 	}
 }
 
-// AFCostInfo is the per-AF cost data returned by cost.get.
+// AFCostInfo is the per-(af, channel) cost data returned by cost.get.
 type AFCostInfo struct {
 	Mean        float64          `json:"mean"`
 	Std         float64          `json:"std"`
@@ -66,9 +66,10 @@ type AFCostDebounced struct {
 }
 
 // CostGetResult is the result of cost.get.
+// Matrix: [src_name][dst_name][af][channel] -> AFCostInfo
 type CostGetResult struct {
-	CostMode string                                  `json:"cost_mode"`
-	Matrix   map[string]map[string]map[string]*AFCostInfo `json:"matrix"` // [src_name][dst_name][af]
+	CostMode string                                                 `json:"cost_mode"`
+	Matrix   map[string]map[string]map[string]map[string]*AFCostInfo `json:"matrix"`
 }
 
 func (c *Controller) apiCostGet() (*CostGetResult, error) {
@@ -77,47 +78,54 @@ func (c *Controller) apiCostGet() (*CostGetResult, error) {
 
 	result := &CostGetResult{
 		CostMode: c.CostMode,
-		Matrix:   make(map[string]map[string]map[string]*AFCostInfo),
+		Matrix:   make(map[string]map[string]map[string]map[string]*AFCostInfo),
 	}
 
 	for srcID, dsts := range c.State.LatencyMatrix {
 		srcName := c.clientNameByID(srcID)
 		if result.Matrix[srcName] == nil {
-			result.Matrix[srcName] = make(map[string]map[string]*AFCostInfo)
+			result.Matrix[srcName] = make(map[string]map[string]map[string]*AFCostInfo)
 		}
 		for dstID, li := range dsts {
 			dstName := c.clientNameByID(dstID)
 			if result.Matrix[srcName][dstName] == nil {
-				result.Matrix[srcName][dstName] = make(map[string]*AFCostInfo)
+				result.Matrix[srcName][dstName] = make(map[string]map[string]*AFCostInfo)
 			}
 			// Show raw latest values at top level, debounced nested
 			rawSource := li.RawAFs
 			if len(rawSource) == 0 {
 				rawSource = li.AFs
 			}
-			for af, raw := range rawSource {
-				info := &AFCostInfo{
-					Mean:        raw.Mean,
-					Std:         raw.Std,
-					PacketLoss:  raw.PacketLoss,
-					Priority:    raw.Priority,
-					ForwardCost: raw.ForwardCost,
-					TotalCost:   raw.QualityCost + raw.ForwardCost,
+			for af, chans := range rawSource {
+				if result.Matrix[srcName][dstName][string(af)] == nil {
+					result.Matrix[srcName][dstName][string(af)] = make(map[string]*AFCostInfo)
 				}
-				if db, ok := li.AFs[af]; ok {
-					totalCost := db.FinalCost
-					if totalCost == 0 {
-						totalCost = db.QualityCost + db.ForwardCost + db.SwitchCost
+				for ch, raw := range chans {
+					info := &AFCostInfo{
+						Mean:        raw.Mean,
+						Std:         raw.Std,
+						PacketLoss:  raw.PacketLoss,
+						Priority:    raw.Priority,
+						ForwardCost: raw.ForwardCost,
+						TotalCost:   raw.QualityCost + raw.ForwardCost,
 					}
-					info.Debounced = &AFCostDebounced{
-						Mean:       db.Mean,
-						Std:        db.Std,
-						PacketLoss: db.PacketLoss,
-						SwitchCost: db.SwitchCost,
-						TotalCost:  totalCost,
+					if dbChans, ok := li.AFs[af]; ok {
+						if db, ok2 := dbChans[ch]; ok2 {
+							totalCost := db.FinalCost
+							if totalCost == 0 {
+								totalCost = db.QualityCost + db.ForwardCost + db.SwitchCost
+							}
+							info.Debounced = &AFCostDebounced{
+								Mean:       db.Mean,
+								Std:        db.Std,
+								PacketLoss: db.PacketLoss,
+								SwitchCost: db.SwitchCost,
+								TotalCost:  totalCost,
+							}
+						}
 					}
+					result.Matrix[srcName][dstName][string(af)][string(ch)] = info
 				}
-				result.Matrix[srcName][dstName][string(af)] = info
 			}
 		}
 	}
@@ -167,22 +175,28 @@ func (c *Controller) apiCostSetMode(params json.RawMessage) (interface{}, error)
 func (c *Controller) apiCostStore() (interface{}, error) {
 	// Read current latency matrix under lock
 	c.mu.Lock()
-	nameCosts := make(map[string]map[string]map[string]float64)
+	// nameCosts: [src][dst][af][channel] -> cost
+	nameCosts := make(map[string]map[string]map[string]map[string]float64)
 	for srcID, dsts := range c.State.LatencyMatrix {
 		srcName := c.clientNameByID(srcID)
 		if nameCosts[srcName] == nil {
-			nameCosts[srcName] = make(map[string]map[string]float64)
+			nameCosts[srcName] = make(map[string]map[string]map[string]float64)
 		}
 		for dstID, li := range dsts {
 			dstName := c.clientNameByID(dstID)
 			if nameCosts[srcName][dstName] == nil {
-				nameCosts[srcName][dstName] = make(map[string]float64)
+				nameCosts[srcName][dstName] = make(map[string]map[string]float64)
 			}
-			for af, al := range li.AFs {
-				if al.PacketLoss >= 1.0 {
-					continue // skip unreachable
+			for af, chans := range li.AFs {
+				for ch, al := range chans {
+					if al.PacketLoss >= 1.0 {
+						continue // skip unreachable
+					}
+					if nameCosts[srcName][dstName][string(af)] == nil {
+						nameCosts[srcName][dstName][string(af)] = make(map[string]float64)
+					}
+					nameCosts[srcName][dstName][string(af)][string(ch)] = al.QualityCost + al.ForwardCost
 				}
-				nameCosts[srcName][dstName][string(af)] = al.QualityCost + al.ForwardCost
 			}
 		}
 	}
@@ -226,26 +240,32 @@ func (c *Controller) apiCostStore() (interface{}, error) {
 
 	// Update in-memory static costs
 	c.mu.Lock()
-	// Convert name costs to AFName-keyed for in-memory storage
-	afNameCosts := make(map[string]map[string]map[types.AFName]float64)
+	// Convert name costs to (AFName, ChannelName)-keyed for in-memory storage
+	afChCosts := make(map[string]map[string]map[types.AFName]map[types.ChannelName]float64)
 	for src, dsts := range nameCosts {
-		afNameCosts[src] = make(map[string]map[types.AFName]float64)
+		afChCosts[src] = make(map[string]map[types.AFName]map[types.ChannelName]float64)
 		for dst, afs := range dsts {
-			afNameCosts[src][dst] = make(map[types.AFName]float64)
-			for af, cost := range afs {
-				afNameCosts[src][dst][types.AFName(af)] = cost
+			afChCosts[src][dst] = make(map[types.AFName]map[types.ChannelName]float64)
+			for af, chans := range afs {
+				inner := make(map[types.ChannelName]float64, len(chans))
+				for ch, cost := range chans {
+					inner[types.ChannelName(ch)] = cost
+				}
+				afChCosts[src][dst][types.AFName(af)] = inner
 			}
 		}
 	}
-	c.Config.StaticCosts = afNameCosts
-	c.staticCostsByID = c.resolveStaticCosts(afNameCosts)
+	c.Config.StaticCosts = afChCosts
+	c.staticCostsByID = c.resolveStaticCosts(afChCosts)
 	c.mu.Unlock()
 
 	// Count entries for display
 	count := 0
 	for _, dsts := range nameCosts {
 		for _, afs := range dsts {
-			count += len(afs)
+			for _, chans := range afs {
+				count += len(chans)
+			}
 		}
 	}
 
@@ -255,14 +275,15 @@ func (c *Controller) apiCostStore() (interface{}, error) {
 
 // ShowClientEntry is a single client entry for show.client.
 type ShowClientEntry struct {
-	ClientID   string                       `json:"client_id"`
-	ClientName string                       `json:"client_name"`
-	Online     bool                         `json:"online"`
-	LastSeen   string                       `json:"last_seen"`
-	Endpoints  map[string]*ShowEndpointInfo `json:"endpoints"`
-	ActiveAF   string                       `json:"active_af"`
-	Synced     bool                         `json:"synced"`
-	RouteCount int                          `json:"route_count"`
+	ClientID      string                       `json:"client_id"`
+	ClientName    string                       `json:"client_name"`
+	Online        bool                         `json:"online"`
+	LastSeen      string                       `json:"last_seen"`
+	Endpoints     map[string]*ShowEndpointInfo `json:"endpoints"` // key: "af/channel"
+	ActiveAF      string                       `json:"active_af"`
+	ActiveChannel string                       `json:"active_channel"`
+	Synced        bool                         `json:"synced"`
+	RouteCount    int                          `json:"route_count"`
 }
 
 type ShowEndpointInfo struct {
@@ -284,11 +305,15 @@ func (c *Controller) apiShowClient() ([]ShowClientEntry, error) {
 			Endpoints:  make(map[string]*ShowEndpointInfo),
 			RouteCount: len(ci.Routes),
 		}
-		for af, ep := range ci.Endpoints {
-			entry.Endpoints[string(af)] = &ShowEndpointInfo{IP: ep.IP.String()}
+		for af, chans := range ci.Endpoints {
+			for ch, ep := range chans {
+				key := string(af) + "/" + string(ch)
+				entry.Endpoints[key] = &ShowEndpointInfo{IP: ep.IP.String()}
+			}
 		}
 		if cc, ok := c.clients[id]; ok {
 			entry.ActiveAF = string(cc.ActiveAF)
+			entry.ActiveChannel = string(cc.ActiveChannel)
 			entry.Synced = cc.Synced
 		}
 		result = append(result, entry)

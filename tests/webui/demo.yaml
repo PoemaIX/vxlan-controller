@@ -21,9 +21,10 @@ probing:
 
 address_families:
   v4:
-    enable: true
-    bind_addr: "127.0.0.1"
-    communication_port: 5000
+    ISP1:
+      enable: true
+      bind_addr: "127.0.0.1"
+      communication_port: 5000
 
 web_ui:
   bind_addr: "0.0.0.0:8080"

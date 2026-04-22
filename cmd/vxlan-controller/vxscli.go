@@ -99,8 +99,8 @@ type afCostDebounced struct {
 }
 
 type costGetResult struct {
-	CostMode string                                       `json:"cost_mode"`
-	Matrix   map[string]map[string]map[string]*afCostInfo `json:"matrix"`
+	CostMode string                                                  `json:"cost_mode"`
+	Matrix   map[string]map[string]map[string]map[string]*afCostInfo `json:"matrix"` // src/dst/af/channel
 }
 
 func vxscliCostGet(sockPath string) {
@@ -133,20 +133,25 @@ func vxscliCostGet(sockPath string) {
 			afs := dsts[dst]
 			afNames := sortedKeys(afs)
 			for _, af := range afNames {
-				info := afs[af]
-				lossStr := fmt.Sprintf("%.2f", info.PacketLoss)
-				if info.PacketLoss >= 1.0 {
-					lossStr = "1.00 (unreachable)"
-				}
-				fmt.Printf("  %s: cost=%.2f mean=%.2f std=%.2f loss=%s prio=%d fwd=%.2f\n",
-					af, info.TotalCost, info.Mean, info.Std, lossStr, info.Priority, info.ForwardCost)
-				if info.Debounced != nil {
-					dbLossStr := fmt.Sprintf("%.2f", info.Debounced.PacketLoss)
-					if info.Debounced.PacketLoss >= 1.0 {
-						dbLossStr = "1.00 (unreachable)"
+				chans := afs[af]
+				chNames := sortedKeys(chans)
+				for _, ch := range chNames {
+					info := chans[ch]
+					lossStr := fmt.Sprintf("%.2f", info.PacketLoss)
+					if info.PacketLoss >= 1.0 {
+						lossStr = "1.00 (unreachable)"
 					}
-					fmt.Printf("  %s(debounced): cost=%.2f mean=%.2f std=%.2f loss=%s sw=%.0f\n",
-						af, info.Debounced.TotalCost, info.Debounced.Mean, info.Debounced.Std, dbLossStr, info.Debounced.SwitchCost)
+					label := af + "/" + ch
+					fmt.Printf("  %s: cost=%.2f mean=%.2f std=%.2f loss=%s prio=%d fwd=%.2f\n",
+						label, info.TotalCost, info.Mean, info.Std, lossStr, info.Priority, info.ForwardCost)
+					if info.Debounced != nil {
+						dbLossStr := fmt.Sprintf("%.2f", info.Debounced.PacketLoss)
+						if info.Debounced.PacketLoss >= 1.0 {
+							dbLossStr = "1.00 (unreachable)"
+						}
+						fmt.Printf("  %s(debounced): cost=%.2f mean=%.2f std=%.2f loss=%s sw=%.0f\n",
+							label, info.Debounced.TotalCost, info.Debounced.Mean, info.Debounced.Std, dbLossStr, info.Debounced.SwitchCost)
+					}
 				}
 			}
 		}
@@ -199,14 +204,15 @@ func vxscliCostStore(sockPath string) {
 }
 
 type showClientEntry struct {
-	ClientID   string                          `json:"client_id"`
-	ClientName string                          `json:"client_name"`
-	Online     bool                            `json:"online"`
-	LastSeen   string                          `json:"last_seen"`
-	Endpoints  map[string]*showEndpointInfo    `json:"endpoints"`
-	ActiveAF   string                          `json:"active_af"`
-	Synced     bool                            `json:"synced"`
-	RouteCount int                             `json:"route_count"`
+	ClientID      string                       `json:"client_id"`
+	ClientName    string                       `json:"client_name"`
+	Online        bool                         `json:"online"`
+	LastSeen      string                       `json:"last_seen"`
+	Endpoints     map[string]*showEndpointInfo `json:"endpoints"` // key: "af/channel"
+	ActiveAF      string                       `json:"active_af"`
+	ActiveChannel string                       `json:"active_channel"`
+	Synced        bool                         `json:"synced"`
+	RouteCount    int                          `json:"route_count"`
 }
 
 type showEndpointInfo struct {
@@ -251,11 +257,15 @@ func vxscliShowClient(sockPath string) {
 		if !c.Synced {
 			syncStr = " (not synced)"
 		}
-		fmt.Printf("%-20s %-6s id=%s af=%s routes=%d%s\n",
-			name, state, c.ClientID, c.ActiveAF, c.RouteCount, syncStr)
-		for _, af := range sortedKeys(c.Endpoints) {
-			ep := c.Endpoints[af]
-			fmt.Printf("  %s: %s\n", af, ep.IP)
+		activeLabel := c.ActiveAF
+		if c.ActiveChannel != "" {
+			activeLabel = c.ActiveAF + "/" + c.ActiveChannel
+		}
+		fmt.Printf("%-20s %-6s id=%s active=%s routes=%d%s\n",
+			name, state, c.ClientID, activeLabel, c.RouteCount, syncStr)
+		for _, key := range sortedKeys(c.Endpoints) {
+			ep := c.Endpoints[key]
+			fmt.Printf("  %s: %s\n", key, ep.IP)
 		}
 		fmt.Printf("  last_seen=%s\n", c.LastSeen)
 	}

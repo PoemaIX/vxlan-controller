@@ -4,6 +4,22 @@
 
 ---
 
+## 重要更新：AF 下多 Channel 架構
+
+原本每個 AF 單一設定的 model 已擴充為「每 AF 下多個 channel」。以下文件內容中凡是看到 `map[AFName]*...` 的 per-AF 結構，實際型別都改成 `map[AFName]map[ChannelName]*...`；凡是用 `AF` 當 key 的地方（listener、AFConn、VxlanDev、Endpoint、probe conn、latency cell、route cell、firewall set、FDB 分流）都同時帶 `ChannelName`。
+
+- ChannelName 型別在 `pkg/types`，`DefaultChannelName = "ISP1"`。
+- `vxlan_name` 必須跨所有 (af, channel) 全域唯一（預設 `<prefix><af>-<channel>`，例如 `vxlan-v4-ISP1`）。
+- bind_addr / autoip_interface 必須在同一個 AF 內互異。
+- handshake 訊息帶 `channel_name`，Controller 嚴格比對 (af, channel) slot，不跨 channel 混用 session。
+- Floyd-Warshall 成本計算與 route matrix 在 (af, channel) 粒度跑，`RouteMatrixCell` 帶 `channel_name`。
+- CLI 輸出所有 AF label 全部改成 `af/channel` 格式（例如 `v4/ISP1`）。
+- 單 channel 情境就是所有 AF 下放一個 `ISP1` channel，autogen 的 scalar / `{bind, ddns}` shorthand 會自動包成 `ISP1`。
+
+下文保留舊型別命名作為結構輪廓參考，實際程式碼以 `pkg/config`、`pkg/client`、`pkg/controller`、`pkg/types` 的當前定義為準。
+
+---
+
 ## 目錄結構
 
 ```

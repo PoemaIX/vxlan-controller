@@ -32,7 +32,13 @@ type ControllerID = ClientID
 // AFName represents an address family, e.g. "v4", "v6", "asia_v4".
 type AFName string
 
-// Endpoint represents a connection endpoint for a given AF.
+// ChannelName names a channel within an AF (multiple ISPs per AF).
+type ChannelName string
+
+// DefaultChannelName is the name assigned to the first/only channel of an AF.
+const DefaultChannelName ChannelName = "ISP1"
+
+// Endpoint represents a connection endpoint for a given (AF, channel).
 type Endpoint struct {
 	IP           netip.Addr
 	ProbePort    uint16
@@ -44,11 +50,11 @@ type PerClientConfig struct {
 	ClientID   ClientID
 	ClientName string
 	Filters    *filter.FilterConfig
-	AFSettings map[AFName]*PerClientAFConfig
+	AFSettings map[AFName]map[ChannelName]*PerClientChannelConfig
 }
 
-// PerClientAFConfig is per-AF settings for a client on the controller.
-type PerClientAFConfig struct {
+// PerClientChannelConfig is per-(AF, channel) settings for a client on the controller.
+type PerClientChannelConfig struct {
 	EndpointOverride string `yaml:"endpoint_override,omitempty"`
 }
 
@@ -56,7 +62,7 @@ type PerClientAFConfig struct {
 type ClientInfo struct {
 	ClientID   ClientID
 	ClientName string
-	Endpoints  map[AFName]*Endpoint
+	Endpoints  map[AFName]map[ChannelName]*Endpoint
 	LastSeen   time.Time
 	Routes     []Type2Route
 }
@@ -67,7 +73,7 @@ type Type2Route struct {
 	IP  netip.Addr
 }
 
-// AFLatency stores probe results for a single AF between two clients.
+// AFLatency stores probe results for a single (AF, channel) between two clients.
 type AFLatency struct {
 	Mean        float64
 	Std         float64
@@ -79,45 +85,62 @@ type AFLatency struct {
 	FinalCost   float64 // quality_cost + forward_cost + switch_cost
 }
 
-// LatencyInfo stores all per-AF probe data between a src→dst client pair.
+// LatencyInfo stores all per-(AF, channel) probe data between a src→dst client pair.
 type LatencyInfo struct {
-	AFs           map[AFName]*AFLatency // debounced (used for routing)
-	RawAFs        map[AFName]*AFLatency // raw latest probe result
-	LastReachable time.Time             // last time any AF was reachable (packet_loss < 1.0)
+	AFs           map[AFName]map[ChannelName]*AFLatency // debounced (used for routing)
+	RawAFs        map[AFName]map[ChannelName]*AFLatency // raw latest probe result
+	LastReachable time.Time                             // last time any AF was reachable (packet_loss < 1.0)
 }
 
-// BestPath selects the best AF and returns (af, cost).
+// BestPath selects the best (AF, channel) and returns (af, channel, cost).
 // Selection: lowest priority first, then lowest final_cost.
-// Returns ("", INF_LATENCY) if no AF is reachable.
-func (li *LatencyInfo) BestPath() (AFName, float64) {
+// Returns ("", "", INF_LATENCY) if nothing is reachable.
+func (li *LatencyInfo) BestPath() (AFName, ChannelName, float64) {
 	bestAF := AFName("")
+	bestCh := ChannelName("")
 	bestCost := INF_LATENCY
 	bestPriority := int(1<<31 - 1)
 
-	for af, al := range li.AFs {
-		if al.Mean >= INF_LATENCY {
-			continue
-		}
-		cost := al.FinalCost
-		if cost == 0 {
-			cost = al.QualityCost + al.ForwardCost + al.SwitchCost
-		}
-		if al.Priority < bestPriority ||
-			(al.Priority == bestPriority && cost < bestCost) {
-			bestPriority = al.Priority
-			bestCost = cost
-			bestAF = af
+	for af, chans := range li.AFs {
+		for ch, al := range chans {
+			if al.Mean >= INF_LATENCY {
+				continue
+			}
+			cost := al.FinalCost
+			if cost == 0 {
+				cost = al.QualityCost + al.ForwardCost + al.SwitchCost
+			}
+			if al.Priority < bestPriority ||
+				(al.Priority == bestPriority && cost < bestCost) {
+				bestPriority = al.Priority
+				bestCost = cost
+				bestAF = af
+				bestCh = ch
+			}
 		}
 	}
-	return bestAF, bestCost
+	return bestAF, bestCh, bestCost
 }
 
 // BestPathEntry is a precomputed BestPath result.
 type BestPathEntry struct {
-	AF     AFName
-	Cost   float64    // final_cost for routing (used by Floyd-Warshall)
-	Raw    *AFLatency // debounced probe data for the selected AF
-	Latest *AFLatency // raw latest probe data for the selected AF (webui display)
+	AF      AFName
+	Channel ChannelName
+	Cost    float64    // final_cost for routing (used by Floyd-Warshall)
+	Raw     *AFLatency // debounced probe data for the selected (af, channel)
+	Latest  *AFLatency // raw latest probe data for the selected (af, channel) (webui display)
+}
+
+// lookupLatency returns li.AFs[af][ch] (or li.RawAFs[af][ch]) safely.
+func lookupChan(m map[AFName]map[ChannelName]*AFLatency, af AFName, ch ChannelName) *AFLatency {
+	if m == nil {
+		return nil
+	}
+	cm, ok := m[af]
+	if !ok {
+		return nil
+	}
+	return cm[ch]
 }
 
 // ComputeBestPaths precomputes BestPath() for every src→dst pair.
@@ -126,11 +149,14 @@ func ComputeBestPaths(m map[ClientID]map[ClientID]*LatencyInfo) map[ClientID]map
 	for src, dsts := range m {
 		row := make(map[ClientID]*BestPathEntry, len(dsts))
 		for dst, li := range dsts {
-			af, cost := li.BestPath()
+			af, ch, cost := li.BestPath()
 			if af != "" {
-				bp := &BestPathEntry{AF: af, Cost: cost, Raw: li.AFs[af]}
-				if li.RawAFs != nil {
-					bp.Latest = li.RawAFs[af]
+				bp := &BestPathEntry{
+					AF:      af,
+					Channel: ch,
+					Cost:    cost,
+					Raw:     lookupChan(li.AFs, af, ch),
+					Latest:  lookupChan(li.RawAFs, af, ch),
 				}
 				row[dst] = bp
 			}
@@ -141,12 +167,12 @@ func ComputeBestPaths(m map[ClientID]map[ClientID]*LatencyInfo) map[ClientID]map
 }
 
 // ComputeBestPathsStatic computes best paths using static costs.
-// Probed LatencyMatrix is still used for reachability: if an AF has PacketLoss == 1.0,
-// it is considered unreachable even if a static cost is defined.
-// staticCosts is indexed by ClientID: [src][dst][af] -> cost.
+// Probed LatencyMatrix is still used for reachability: if an (af, channel) has
+// PacketLoss == 1.0, it is considered unreachable even if a static cost is defined.
+// staticCosts is indexed: [src][dst][af][channel] -> cost.
 func ComputeBestPathsStatic(
 	latencyMatrix map[ClientID]map[ClientID]*LatencyInfo,
-	staticCosts map[ClientID]map[ClientID]map[AFName]float64,
+	staticCosts map[ClientID]map[ClientID]map[AFName]map[ChannelName]float64,
 ) map[ClientID]map[ClientID]*BestPathEntry {
 	result := make(map[ClientID]map[ClientID]*BestPathEntry)
 
@@ -154,28 +180,29 @@ func ComputeBestPathsStatic(
 		row := make(map[ClientID]*BestPathEntry)
 		for dst, afs := range dsts {
 			var bestAF AFName
+			var bestCh ChannelName
 			bestCost := INF_LATENCY
 
-			for af, cost := range afs {
-				// Check reachability from probe data.
-				// Require probe data to confirm the AF is actually usable —
-				// if there's no probe data at all (e.g. destination has no
-				// endpoint for this AF), treat as unreachable.
-				li, srcOK := latencyMatrix[src]
-				if !srcOK {
-					continue // no probe data from source
-				}
-				info, dstOK := li[dst]
-				if !dstOK {
-					continue // no probe data for this pair
-				}
-				al, afOK := info.AFs[af]
-				if !afOK || al.PacketLoss >= 1.0 {
-					continue // no probe data for this AF, or unreachable
-				}
-				if cost < bestCost {
-					bestCost = cost
-					bestAF = af
+			for af, chans := range afs {
+				for ch, cost := range chans {
+					// Check reachability from probe data.
+					li, srcOK := latencyMatrix[src]
+					if !srcOK {
+						continue
+					}
+					info, dstOK := li[dst]
+					if !dstOK {
+						continue
+					}
+					al := lookupChan(info.AFs, af, ch)
+					if al == nil || al.PacketLoss >= 1.0 {
+						continue
+					}
+					if cost < bestCost {
+						bestCost = cost
+						bestAF = af
+						bestCh = ch
+					}
 				}
 			}
 
@@ -183,13 +210,17 @@ func ComputeBestPathsStatic(
 				var raw, latest *AFLatency
 				if li, ok := latencyMatrix[src]; ok {
 					if info, ok := li[dst]; ok {
-						raw = info.AFs[bestAF]
-						if info.RawAFs != nil {
-							latest = info.RawAFs[bestAF]
-						}
+						raw = lookupChan(info.AFs, bestAF, bestCh)
+						latest = lookupChan(info.RawAFs, bestAF, bestCh)
 					}
 				}
-				row[dst] = &BestPathEntry{AF: bestAF, Cost: bestCost, Raw: raw, Latest: latest}
+				row[dst] = &BestPathEntry{
+					AF:      bestAF,
+					Channel: bestCh,
+					Cost:    bestCost,
+					Raw:     raw,
+					Latest:  latest,
+				}
 			}
 		}
 		if len(row) > 0 {
@@ -204,6 +235,7 @@ func ComputeBestPathsStatic(
 type RouteEntry struct {
 	NextHop ClientID
 	AF      AFName
+	Channel ChannelName
 }
 
 // RouteTableEntry stores MAC/IP ownership.

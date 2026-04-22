@@ -10,11 +10,18 @@ import (
 	"vxlan-controller/pkg/vlog"
 )
 
-// setName returns a sanitized nftables set name for a given AF.
-// e.g. "asia_v4" → "af_asia_v4", "v6" → "af_v6"
-func setName(af types.AFName) string {
-	s := strings.ReplaceAll(string(af), "-", "_")
-	return "af_" + s
+// afChannelKey identifies one (af, channel) tuple used as a map key.
+type afChannelKey struct {
+	AF      types.AFName
+	Channel types.ChannelName
+}
+
+// setName returns a sanitized nftables set name for a given (af, channel).
+// e.g. ("asia_v4", "ISP1") → "af_asia_v4__ISP1"
+func setName(af types.AFName, ch types.ChannelName) string {
+	a := strings.ReplaceAll(string(af), "-", "_")
+	c := strings.ReplaceAll(string(ch), "-", "_")
+	return "af_" + a + "__" + c
 }
 
 // fwTable returns the configured nftables table name.
@@ -22,7 +29,7 @@ func (c *Client) fwTable() string {
 	return c.Config.VxlanFirewallTable
 }
 
-// initFirewall creates the nftables table, per-AF sets, and chain for VXLAN source filtering.
+// initFirewall creates the nftables table, per-(af, channel) sets, and chain for VXLAN source filtering.
 func (c *Client) initFirewall() error {
 	if !c.Config.VxlanFirewall {
 		return nil
@@ -37,7 +44,7 @@ func (c *Client) initFirewall() error {
 	return nil
 }
 
-// syncFirewallPeers extracts per-AF peer endpoint IPs from the authority controller view
+// syncFirewallPeers extracts per-(af, channel) peer endpoint IPs from the authority controller view
 // and updates the nftables allowed sets. Must be called WITHOUT c.mu held.
 func (c *Client) syncFirewallPeers() {
 	if !c.Config.VxlanFirewall {
@@ -45,19 +52,22 @@ func (c *Client) syncFirewallPeers() {
 	}
 
 	c.mu.Lock()
-	perAF := c.collectPeerIPsPerAF()
+	peers := c.collectPeerIPsPerAFChannel()
 	c.mu.Unlock()
 
 	tbl := c.fwTable()
 	var cmds []string
-	for af, afCfg := range c.Config.AFSettings {
-		if !afCfg.Enable {
-			continue
-		}
-		sn := setName(af)
-		cmds = append(cmds, fmt.Sprintf("flush set inet %s %s", tbl, sn))
-		if ips, ok := perAF[af]; ok && len(ips) > 0 {
-			cmds = append(cmds, fmt.Sprintf("add element inet %s %s { %s }", tbl, sn, strings.Join(ips, ", ")))
+	for af, chans := range c.Config.AFSettings {
+		for ch, cc := range chans {
+			if !cc.Enable {
+				continue
+			}
+			sn := setName(af, ch)
+			cmds = append(cmds, fmt.Sprintf("flush set inet %s %s", tbl, sn))
+			k := afChannelKey{AF: af, Channel: ch}
+			if ips, ok := peers[k]; ok && len(ips) > 0 {
+				cmds = append(cmds, fmt.Sprintf("add element inet %s %s { %s }", tbl, sn, strings.Join(ips, ", ")))
+			}
 		}
 	}
 
@@ -71,7 +81,7 @@ func (c *Client) syncFirewallPeers() {
 		return
 	}
 
-	vlog.Debugf("[Firewall] updated allowed peers: %v", perAF)
+	vlog.Debugf("[Firewall] updated allowed peers: %v", peers)
 }
 
 // rebuildFirewallRules rebuilds the entire table (sets + chain rules) to reflect
@@ -82,10 +92,10 @@ func (c *Client) rebuildFirewallRules() {
 	}
 
 	c.mu.Lock()
-	perAF := c.collectPeerIPsPerAF()
+	peers := c.collectPeerIPsPerAFChannel()
 	c.mu.Unlock()
 
-	nft := c.buildFirewallRuleset(perAF)
+	nft := c.buildFirewallRuleset(peers)
 	if err := applyNft(nft); err != nil {
 		vlog.Errorf("[Firewall] rebuild rules: %v", err)
 		return
@@ -104,10 +114,10 @@ func (c *Client) cleanupFirewall() {
 	vlog.Infof("[Firewall] VXLAN firewall cleaned up")
 }
 
-// collectPeerIPsPerAF returns per-AF sorted lists of peer endpoint IPs.
+// collectPeerIPsPerAFChannel returns per-(af, channel) sorted lists of peer endpoint IPs.
 // Must be called with c.mu held.
-func (c *Client) collectPeerIPsPerAF() map[types.AFName][]string {
-	result := make(map[types.AFName][]string)
+func (c *Client) collectPeerIPsPerAFChannel() map[afChannelKey][]string {
+	result := make(map[afChannelKey][]string)
 
 	if c.AuthorityCtrl == nil {
 		return result
@@ -121,16 +131,19 @@ func (c *Client) collectPeerIPsPerAF() map[types.AFName][]string {
 		if clientID == c.ClientID {
 			continue
 		}
-		for af, ep := range ci.Endpoints {
-			if !ep.IP.IsValid() {
-				continue
+		for af, chans := range ci.Endpoints {
+			for ch, ep := range chans {
+				if !ep.IP.IsValid() {
+					continue
+				}
+				k := afChannelKey{AF: af, Channel: ch}
+				result[k] = append(result[k], ep.IP.String())
 			}
-			result[af] = append(result[af], ep.IP.String())
 		}
 	}
 
 	// Deduplicate and sort
-	for af, ips := range result {
+	for k, ips := range result {
 		sort.Strings(ips)
 		deduped := ips[:0]
 		for i, ip := range ips {
@@ -138,15 +151,15 @@ func (c *Client) collectPeerIPsPerAF() map[types.AFName][]string {
 				deduped = append(deduped, ip)
 			}
 		}
-		result[af] = deduped
+		result[k] = deduped
 	}
 
 	return result
 }
 
 // buildFirewallRuleset generates a complete nftables ruleset for VXLAN source filtering.
-// Each AF gets its own set, so multi-AF configs with different peers are isolated.
-func (c *Client) buildFirewallRuleset(perAF map[types.AFName][]string) string {
+// Each (af, channel) gets its own set and rule, so multi-channel configs with different peers are isolated.
+func (c *Client) buildFirewallRuleset(peers map[afChannelKey][]string) string {
 	var sb strings.Builder
 
 	tbl := c.fwTable()
@@ -155,47 +168,52 @@ func (c *Client) buildFirewallRuleset(perAF map[types.AFName][]string) string {
 	exec.Command("nft", "delete", "table", "inet", tbl).Run()
 	sb.WriteString(fmt.Sprintf("table inet %s {\n", tbl))
 
-	// Per-AF sets
-	for af, afCfg := range c.Config.AFSettings {
-		if !afCfg.Enable {
-			continue
-		}
-		sn := setName(af)
-		addrType := "ipv4_addr"
-		if afCfg.BindAddr.IsValid() && afCfg.BindAddr.Is6() {
-			addrType = "ipv6_addr"
-		} else if !afCfg.BindAddr.IsValid() {
-			// Not yet resolved; guess from AF name
-			low := strings.ToLower(string(af))
-			if strings.Contains(low, "v6") || strings.Contains(low, "ipv6") {
-				addrType = "ipv6_addr"
+	// Per-(af, channel) sets
+	for af, chans := range c.Config.AFSettings {
+		for ch, cc := range chans {
+			if !cc.Enable {
+				continue
 			}
-		}
+			sn := setName(af, ch)
+			addrType := "ipv4_addr"
+			if cc.BindAddr.IsValid() && cc.BindAddr.Is6() {
+				addrType = "ipv6_addr"
+			} else if !cc.BindAddr.IsValid() {
+				// Not yet resolved; guess from AF name
+				low := strings.ToLower(string(af))
+				if strings.Contains(low, "v6") || strings.Contains(low, "ipv6") {
+					addrType = "ipv6_addr"
+				}
+			}
 
-		sb.WriteString(fmt.Sprintf("    set %s {\n", sn))
-		sb.WriteString(fmt.Sprintf("        type %s\n", addrType))
-		if ips, ok := perAF[af]; ok && len(ips) > 0 {
-			sb.WriteString(fmt.Sprintf("        elements = { %s }\n", strings.Join(ips, ", ")))
+			sb.WriteString(fmt.Sprintf("    set %s {\n", sn))
+			sb.WriteString(fmt.Sprintf("        type %s\n", addrType))
+			k := afChannelKey{AF: af, Channel: ch}
+			if ips, ok := peers[k]; ok && len(ips) > 0 {
+				sb.WriteString(fmt.Sprintf("        elements = { %s }\n", strings.Join(ips, ", ")))
+			}
+			sb.WriteString("    }\n")
 		}
-		sb.WriteString("    }\n")
 	}
 
 	// INPUT chain
 	sb.WriteString("    chain input {\n")
 	sb.WriteString("        type filter hook input priority filter; policy accept;\n")
 
-	for af, afCfg := range c.Config.AFSettings {
-		if !afCfg.Enable || !afCfg.BindAddr.IsValid() {
-			continue
-		}
-		sn := setName(af)
-		port := afCfg.VxlanDstPort
-		addr := afCfg.BindAddr
+	for af, chans := range c.Config.AFSettings {
+		for ch, cc := range chans {
+			if !cc.Enable || !cc.BindAddr.IsValid() {
+				continue
+			}
+			sn := setName(af, ch)
+			port := cc.VxlanDstPort
+			addr := cc.BindAddr
 
-		if addr.Is4() {
-			sb.WriteString(fmt.Sprintf("        udp dport %d ip daddr %s ip saddr != @%s counter drop\n", port, addr, sn))
-		} else {
-			sb.WriteString(fmt.Sprintf("        udp dport %d ip6 daddr %s ip6 saddr != @%s counter drop\n", port, addr, sn))
+			if addr.Is4() {
+				sb.WriteString(fmt.Sprintf("        udp dport %d ip daddr %s ip saddr != @%s counter drop\n", port, addr, sn))
+			} else {
+				sb.WriteString(fmt.Sprintf("        udp dport %d ip6 daddr %s ip6 saddr != @%s counter drop\n", port, addr, sn))
+			}
 		}
 	}
 

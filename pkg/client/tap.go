@@ -121,19 +121,29 @@ func (c *Client) forwardBroadcast(frame []byte) {
 		return
 	}
 
-	afCfg, ok := c.Config.AFSettings[cc.ActiveAF]
+	afChans, ok := c.Config.AFSettings[cc.ActiveAF]
 	if !ok {
 		vlog.Verbosef("[Client] broadcast: no AF config for %s", cc.ActiveAF)
 		return
 	}
-
-	afc, ok := cc.AFConns[cc.ActiveAF]
-	if !ok || afc.UDPSession == nil || afc.CommUDPConn == nil {
-		vlog.Verbosef("[Client] broadcast: no AF conn (ok=%v, udp=%v, comm=%v)", ok, afc.UDPSession != nil, afc.CommUDPConn != nil)
+	cfgc, ok := afChans[cc.ActiveChannel]
+	if !ok {
+		vlog.Verbosef("[Client] broadcast: no channel config for %s/%s", cc.ActiveAF, cc.ActiveChannel)
 		return
 	}
 
-	for _, ctrl := range afCfg.Controllers {
+	afcChans, ok := cc.AFConns[cc.ActiveAF]
+	if !ok {
+		vlog.Verbosef("[Client] broadcast: no AF conn map for %s", cc.ActiveAF)
+		return
+	}
+	afc, ok := afcChans[cc.ActiveChannel]
+	if !ok || afc.UDPSession == nil || afc.CommUDPConn == nil {
+		vlog.Verbosef("[Client] broadcast: no AF/channel conn (ok=%v)", ok)
+		return
+	}
+
+	for _, ctrl := range cfgc.Controllers {
 		if types.ClientID(ctrl.PubKey) == *c.AuthorityCtrl {
 			addr := &net.UDPAddr{
 				IP:   ctrl.Addr.Addr().AsSlice(),
@@ -145,7 +155,7 @@ func (c *Client) forwardBroadcast(frame []byte) {
 			return
 		}
 	}
-	vlog.Verbosef("[Client] broadcast: authority %s not found in AF %s controllers", c.AuthorityCtrl.Hex()[:8], cc.ActiveAF)
+	vlog.Verbosef("[Client] broadcast: authority %s not found in AF=%s channel=%s controllers", c.AuthorityCtrl.Hex()[:8], cc.ActiveAF, cc.ActiveChannel)
 }
 
 // tapWriteLoop receives broadcast frames from the controller and injects into bridge.

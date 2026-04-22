@@ -7,10 +7,17 @@ option go_package = "vxlan-controller/proto";
 // Client → Controller
 message ClientRegister {
   bytes client_id = 1; // 32 bytes pubkey
-  map<string, AFEndpoint> af_endpoints = 2; // key = af_name
+  // Channel identity of THIS TCP connection. Controller uses (af_name, channel_name)
+  // to decide which existing (af, channel) slot to replace.
+  string af_name = 3;
+  string channel_name = 4;
+  // Full list of this client's (af, channel) endpoints so peers know how to reach them.
+  repeated AFEndpoint endpoints = 2;
 }
 
 message AFEndpoint {
+  string af_name = 3;
+  string channel_name = 4;
   uint32 probe_port = 1;
   uint32 vxlan_dst_port = 2;
 }
@@ -45,7 +52,7 @@ message ControllerState {
 
 message ClientInfoProto {
   bytes client_id = 1;
-  map<string, EndpointProto> endpoints = 2; // key = af_name
+  repeated EndpointProto endpoints = 2; // each carries (af_name, channel_name)
   int64 last_seen = 3;
   repeated Type2Route routes = 4;
   double additional_cost = 5; // deprecated, kept for wire compat
@@ -53,6 +60,8 @@ message ClientInfoProto {
 }
 
 message EndpointProto {
+  string af_name = 4;
+  string channel_name = 5;
   bytes ip = 1; // 4 or 16 bytes
   uint32 probe_port = 2;
   uint32 vxlan_dst_port = 3;
@@ -109,6 +118,7 @@ message RouteMatrixCell {
   bytes dst_client_id = 1;
   bytes nexthop_id = 2;
   string af_name = 3;
+  string channel_name = 4;
 }
 
 message RouteTableEntryProto {
@@ -133,17 +143,19 @@ message ProbeResults {
 }
 
 message ProbeResultEntry {
-  map<string, AFProbeResult> af_results = 1; // key = af_name
-  map<string, AFProbeResult> debounced_af_results = 2; // key = af_name; smoothed over window
+  repeated AFProbeResult af_results = 1; // each carries (af_name, channel_name)
+  repeated AFProbeResult debounced_af_results = 2; // smoothed over window
 }
 
 message AFProbeResult {
+  string af_name = 9;
+  string channel_name = 10;
   double latency_mean = 1;
   double latency_std = 2;
   double packet_loss = 3;
   int32 priority = 4;
-  double forward_cost = 5;    // cost of transiting through this node via this AF
-  double switch_cost = 6;     // 0 for preferred AF, >0 for others (hysteresis)
+  double forward_cost = 5;    // cost of transiting through this node via this (af, channel)
+  double switch_cost = 6;     // 0 for preferred (af, channel), >0 for others (hysteresis)
   double final_cost = 7;      // quality_cost + forward_cost + switch_cost
   double quality_cost = 8;    // abstract quality metric (currently = latency_mean)
 }

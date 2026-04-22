@@ -68,9 +68,10 @@ type ControllerState struct {
 type ClientInfo struct {
 	ClientID   types.ClientID
 	ClientName string
-	Endpoints  map[types.AFName]*types.Endpoint
-	LastSeen   time.Time
-	Routes     []types.Type2Route
+	// Endpoints[af][channel] -> endpoint
+	Endpoints map[types.AFName]map[types.ChannelName]*types.Endpoint
+	LastSeen  time.Time
+	Routes    []types.Type2Route
 }
 
 // QueueItem is the sendqueue element. State and Message are independent;
@@ -88,20 +89,23 @@ type QueueItem struct {
 // update, so the source client can confirm round-trip completion in its
 // syncCheckLoop. Both fields are protected by Controller.mu.
 type ClientConn struct {
-	ClientID  types.ClientID
-	AFConns   map[types.AFName]*AFConn
-	ActiveAF  types.AFName
-	Synced    bool
-	SendQueue chan QueueItem
-	Filters   *filter.FilterSet
+	ClientID types.ClientID
+	// AFConns[af][channel] -> conn
+	AFConns       map[types.AFName]map[types.ChannelName]*AFConn
+	ActiveAF      types.AFName
+	ActiveChannel types.ChannelName
+	Synced        bool
+	SendQueue     chan QueueItem
+	Filters       *filter.FilterSet
 
 	LastClientSessionID string
 	LastClientSeqid     uint64
 }
 
-// AFConn represents a single AF TCP connection to a client.
+// AFConn represents a single (AF, channel) TCP connection to a client.
 type AFConn struct {
 	AF          types.AFName
+	Channel     types.ChannelName
 	TCPConn     net.Conn
 	Session     *crypto.Session
 	ConnectedAt time.Time
@@ -123,9 +127,18 @@ func newControllerState() *ControllerState {
 	}
 }
 
+// OverrideKey identifies a specific (AF, channel) for endpoint override lookups.
+type OverrideKey struct {
+	AF      types.AFName
+	Channel types.ChannelName
+}
+
 // Snapshot serializes the full ControllerState to protobuf.
-// overrideFn returns per-AF endpoint overrides for a given client (nil if none).
-func (cs *ControllerState) Snapshot(controllerID types.ClientID, overrideFn func(types.ClientID) map[types.AFName]string) *pb.ControllerState {
+// overrideFn returns per-(AF, channel) endpoint overrides for a given client (nil if none).
+func (cs *ControllerState) Snapshot(
+	controllerID types.ClientID,
+	overrideFn func(types.ClientID) map[OverrideKey]string,
+) *pb.ControllerState {
 	state := &pb.ControllerState{
 		ClientCount:               uint32(len(cs.Clients)),
 		LastClientChangeTimestamp: cs.LastClientChange.UnixNano(),
@@ -152,27 +165,30 @@ func addrToBytes(a netip.Addr) []byte {
 	return b[:]
 }
 
-func clientInfoToProto(ci *ClientInfo, overrides map[types.AFName]string) *pb.ClientInfoProto {
+func clientInfoToProto(ci *ClientInfo, overrides map[OverrideKey]string) *pb.ClientInfoProto {
 	p := &pb.ClientInfoProto{
 		ClientId:   ci.ClientID[:],
 		ClientName: ci.ClientName,
-		Endpoints:  make(map[string]*pb.EndpointProto),
 		LastSeen:   ci.LastSeen.UnixNano(),
 	}
 
-	for af, ep := range ci.Endpoints {
-		epProto := &pb.EndpointProto{
-			ProbePort:    uint32(ep.ProbePort),
-			VxlanDstPort: uint32(ep.VxlanDstPort),
-		}
-		ip := ep.IP
-		if override, ok := overrides[af]; ok && override != "" {
-			if resolved, err := cachedResolve(override); err == nil {
-				ip = resolved
+	for af, chans := range ci.Endpoints {
+		for ch, ep := range chans {
+			epProto := &pb.EndpointProto{
+				AfName:       string(af),
+				ChannelName:  string(ch),
+				ProbePort:    uint32(ep.ProbePort),
+				VxlanDstPort: uint32(ep.VxlanDstPort),
 			}
+			ip := ep.IP
+			if override, ok := overrides[OverrideKey{AF: af, Channel: ch}]; ok && override != "" {
+				if resolved, err := cachedResolve(override); err == nil {
+					ip = resolved
+				}
+			}
+			epProto.Ip = addrToBytes(ip)
+			p.Endpoints = append(p.Endpoints, epProto)
 		}
-		epProto.Ip = addrToBytes(ip)
-		p.Endpoints[string(af)] = epProto
 	}
 
 	for _, r := range ci.Routes {
@@ -195,6 +211,7 @@ func routeMatrixToProto(rm map[types.ClientID]map[types.ClientID]*types.RouteEnt
 				DstClientId: dst[:],
 				NexthopId:   entry.NextHop[:],
 				AfName:      string(entry.AF),
+				ChannelName: string(entry.Channel),
 			}
 			row.Cells = append(row.Cells, cell)
 		}
@@ -226,12 +243,12 @@ func routeTableToProto(rt []*types.RouteTableEntry) []*pb.RouteTableEntryProto {
 func ProtoToClientInfo(p *pb.ClientInfoProto) *ClientInfo {
 	ci := &ClientInfo{
 		ClientName: p.ClientName,
-		Endpoints:  make(map[types.AFName]*types.Endpoint),
+		Endpoints:  make(map[types.AFName]map[types.ChannelName]*types.Endpoint),
 		LastSeen:   time.Unix(0, p.LastSeen),
 	}
 	copy(ci.ClientID[:], p.ClientId)
 
-	for af, ep := range p.Endpoints {
+	for _, ep := range p.Endpoints {
 		e := &types.Endpoint{
 			ProbePort:    uint16(ep.ProbePort),
 			VxlanDstPort: uint16(ep.VxlanDstPort),
@@ -241,7 +258,12 @@ func ProtoToClientInfo(p *pb.ClientInfoProto) *ClientInfo {
 		} else if len(ep.Ip) == 16 {
 			e.IP = netip.AddrFrom16([16]byte(ep.Ip))
 		}
-		ci.Endpoints[types.AFName(af)] = e
+		af := types.AFName(ep.AfName)
+		ch := types.ChannelName(ep.ChannelName)
+		if _, ok := ci.Endpoints[af]; !ok {
+			ci.Endpoints[af] = make(map[types.ChannelName]*types.Endpoint)
+		}
+		ci.Endpoints[af][ch] = e
 	}
 
 	for _, r := range p.Routes {
@@ -273,6 +295,7 @@ func ProtoToRouteMatrix(p *pb.RouteMatrixProto) map[types.ClientID]map[types.Cli
 			rm[src][dst] = &types.RouteEntry{
 				NextHop: nexthop,
 				AF:      types.AFName(cell.AfName),
+				Channel: types.ChannelName(cell.ChannelName),
 			}
 		}
 	}

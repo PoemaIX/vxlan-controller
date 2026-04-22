@@ -71,7 +71,12 @@ Client 配置(client.conf）:
     * rate_limit: 頻率限制設定
         * per_mac: 每個 source MAC 的封包速率上限（預設 64 pps）
         * per_client: 每個 Client 的封包速率上限（預設 1000 pps）
-* AddressFamilySpecficSettings: map<af_name, per_af_conf>
+* AddressFamilySpecficSettings: map<af_name, map<channel_name, per_channel_conf>>
+    * **Channel 概念**: 每個 AF 下可以有多個 channel（例如 `ISP1`、`ISP2`），每個 channel 獨立綁定 bind_addr / autoip_interface / vxlan device，讓同一 AF 可以同時用多條實體上行（冗餘 ISP、不同電信商、獨立負載平衡策略）。
+    * 同一 AF 內不同 channel 的 bind_addr / autoip_interface 必須互異；跨整個 client 的 vxlan_name 必須全域唯一（預設命名 `<prefix><af>-<channel>`，例如 `vxlan-v4-ISP1`）。
+    * handshake 時交換 channel_name，Controller 依 (af, channel) 嚴格比對 slot，不跨 channel 混用連線或成本。
+    * route matrix cell 帶 `(af_name, channel_name)`，Floyd-Warshall 在 (af, channel) 粒度跑。
+    * 單 channel 情境直接用 `ISP1` 即可（autogen 的 scalar shorthand 會自動包成 `ISP1`）。
     * v4:
         * name: v4
         * enable:true/false
@@ -167,7 +172,12 @@ Controller 配置:
         * `/api/state`: 一次性 JSON 狀態查詢
     * mac_aliases: MAC 地址別名 map（顯示友善名稱）
     * nodes: 節點顯示配置 map（node_name → {label, pos:[x,y]}）
-* AddressFamilySpecficSettings: map<af_name, per_af_conf>
+* AddressFamilySpecficSettings: map<af_name, map<channel_name, per_channel_conf>>
+    * **Channel 概念**: 每個 AF 下可以有多個 channel（例如 `ISP1`、`ISP2`），每個 channel 獨立綁定 bind_addr / autoip_interface / vxlan device，讓同一 AF 可以同時用多條實體上行（冗餘 ISP、不同電信商、獨立負載平衡策略）。
+    * 同一 AF 內不同 channel 的 bind_addr / autoip_interface 必須互異；跨整個 client 的 vxlan_name 必須全域唯一（預設命名 `<prefix><af>-<channel>`，例如 `vxlan-v4-ISP1`）。
+    * handshake 時交換 channel_name，Controller 依 (af, channel) 嚴格比對 slot，不跨 channel 混用連線或成本。
+    * route matrix cell 帶 `(af_name, channel_name)`，Floyd-Warshall 在 (af, channel) 粒度跑。
+    * 單 channel 情境直接用 `ISP1` 即可（autogen 的 scalar shorthand 會自動包成 `ISP1`）。
     * v4:
         * name: v4
         * enable:true/false

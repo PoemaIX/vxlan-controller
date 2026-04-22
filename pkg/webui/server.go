@@ -61,6 +61,7 @@ type LatencyCellJSON struct {
 	Dst     string  `json:"dst"`
 	Latency float64 `json:"latency"`
 	AF      string  `json:"af"`
+	Channel string  `json:"channel"`
 }
 
 type RouteMatrixJSON struct {
@@ -72,6 +73,7 @@ type RouteMatrixCellJSON struct {
 	Dst     string `json:"dst"`
 	NextHop string `json:"next_hop"`
 	AF      string `json:"af"`
+	Channel string `json:"channel"`
 }
 
 type MACStatsJSON struct {

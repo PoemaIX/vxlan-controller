@@ -146,8 +146,10 @@ func (c *Client) handleNeighEvent(update netlink.NeighUpdate) {
 		case cc.SendQueue <- ClientQueueItem{MACDelta: delta}:
 		default:
 			if cc.ActiveAF != "" {
-				if afc, ok := cc.AFConns[cc.ActiveAF]; ok {
-					disconnectAFCs = append(disconnectAFCs, afc)
+				if chMap, ok := cc.AFConns[cc.ActiveAF]; ok {
+					if afc, ok2 := chMap[cc.ActiveChannel]; ok2 {
+						disconnectAFCs = append(disconnectAFCs, afc)
+					}
 				}
 			}
 		}
@@ -208,8 +210,10 @@ func (c *Client) handleBridgeMACChange(link netlink.Link) {
 			// Symmetric to handleNeighEvent: queue full means we'd lose a
 			// MAC delta, so force a reconnect+resync rather than silent drop.
 			if cc.ActiveAF != "" {
-				if afc, ok := cc.AFConns[cc.ActiveAF]; ok {
-					disconnectAFCs = append(disconnectAFCs, afc)
+				if chMap, ok := cc.AFConns[cc.ActiveAF]; ok {
+					if afc, ok2 := chMap[cc.ActiveChannel]; ok2 {
+						disconnectAFCs = append(disconnectAFCs, afc)
+					}
 				}
 			}
 		}
@@ -344,9 +348,11 @@ func (c *Client) isLocalFDBEntry(n netlink.Neigh) bool {
 	}
 	name := link.Attrs().Name
 
-	for _, vd := range c.VxlanDevs {
-		if name == vd.Name {
-			return false
+	for _, chans := range c.VxlanDevs {
+		for _, vd := range chans {
+			if name == vd.Name {
+				return false
+			}
 		}
 	}
 	if name == "tap-inject" {

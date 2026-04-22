@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 TESTS=(
+    "test_multichannel_autogen.sh"
     "test_connectivity.sh"
     "test_neigh_suppress.sh"
     "test_controller_failover.sh"

@@ -142,8 +142,10 @@ func populateMockState(c *Controller, sites []mockSiteConfig) {
 		ci := &ClientInfo{
 			ClientID:   s.id,
 			ClientName: s.name,
-			Endpoints: map[types.AFName]*types.Endpoint{
-				"v4": {IP: s.v4Addr, ProbePort: 5010, VxlanDstPort: 4789},
+			Endpoints: map[types.AFName]map[types.ChannelName]*types.Endpoint{
+				"v4": {
+					types.DefaultChannelName: {IP: s.v4Addr, ProbePort: 5010, VxlanDstPort: 4789},
+				},
 			},
 			LastSeen: now.Add(-time.Duration(rng.Intn(10)) * time.Second),
 		}
@@ -165,8 +167,9 @@ func populateMockState(c *Controller, sites []mockSiteConfig) {
 			jitter := base * 0.1 * (rng.Float64() - 0.5)
 			latency := base + jitter
 			c.State.BestPaths[src.id][dst.id] = &types.BestPathEntry{
-				AF:   "v4",
-				Cost: latency + 20,
+				AF:      "v4",
+				Channel: types.DefaultChannelName,
+				Cost:    latency + 20,
 				Raw: &types.AFLatency{
 					Mean:        latency,
 					Std:         latency * 0.05,
@@ -189,6 +192,7 @@ func populateMockState(c *Controller, sites []mockSiteConfig) {
 			c.State.RouteMatrix[src.id][dst.id] = &types.RouteEntry{
 				NextHop: dst.id,
 				AF:      "v4",
+				Channel: types.DefaultChannelName,
 			}
 		}
 	}
