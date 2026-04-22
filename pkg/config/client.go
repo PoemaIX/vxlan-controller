@@ -22,7 +22,7 @@ type ClientConfig struct {
 	NeighSuppress      bool
 	VxlanFirewall      bool
 	VxlanFirewallTable string
-	AFSettings         map[types.AFName]*ClientAFConfig
+	AFSettings         map[types.AFName]map[types.ChannelName]*ClientChannelConfig
 	InitTimeout        time.Duration
 	StatsInterval      time.Duration
 	ProbeWindowSize    int
@@ -37,8 +37,10 @@ type ClientConfig struct {
 	SyncCheckMaxDelay  uint64
 }
 
-type ClientAFConfig struct {
-	Name              types.AFName
+// ClientChannelConfig is the per-(AF, channel) configuration on a client.
+type ClientChannelConfig struct {
+	AF                types.AFName
+	Channel           types.ChannelName
 	Enable            bool
 	BindAddr          netip.Addr
 	AutoIPInterface   string
@@ -147,40 +149,59 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 		cfg.Filters = filter.ParseFilterNode(n, configDir)
 	}
 
-	// AF settings (map overlay: keys from user, values default from matching or first default AF)
+	// AF settings: outer map = AF, inner map = channel.
 	if afNode, ok := m["address_families"]; ok {
-		cfg.AFSettings = make(map[types.AFName]*ClientAFConfig)
+		cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig)
 		afMap := nodeMap(afNode)
-		for name, afValueNode := range afMap {
-			afDt := dt.sub("address_families." + name)
-			af, err := overlayClientAF(name, afValueNode, afDt)
-			if err != nil {
-				return nil, nil, fmt.Errorf("af %s: %w", name, err)
+		for afNameStr, chanNode := range afMap {
+			afName := types.AFName(afNameStr)
+			chanMap := nodeMap(chanNode)
+			if chanMap == nil {
+				return nil, nil, fmt.Errorf("af %s: expected channel mapping", afNameStr)
 			}
-			cfg.AFSettings[types.AFName(name)] = af
+			cfg.AFSettings[afName] = make(map[types.ChannelName]*ClientChannelConfig)
+			for chNameStr, chValueNode := range chanMap {
+				chName := types.ChannelName(chNameStr)
+				chDt := dt.sub("address_families." + afNameStr + "." + chNameStr)
+				ch, err := overlayClientChannel(afName, chName, chValueNode, chDt)
+				if err != nil {
+					return nil, nil, fmt.Errorf("af %s channel %s: %w", afNameStr, chNameStr, err)
+				}
+				cfg.AFSettings[afName][chName] = ch
+			}
 		}
+	}
+
+	if err := validateClientUniqueness(cfg.AFSettings); err != nil {
+		return nil, nil, err
 	}
 
 	return cfg, dt.result(), nil
 }
 
-func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientAFConfig, error) {
-	afName := types.AFName(name)
-
-	// Clone matching default AF, or first available
-	var base *ClientAFConfig
-	if def, ok := DefaultClientConfig.AFSettings[afName]; ok {
-		base = cloneClientAFConfig(def)
-	} else {
-		for _, def := range DefaultClientConfig.AFSettings {
-			base = cloneClientAFConfig(def)
-			break
+// pickClientChannelDefault returns the best matching default template for (af, ch).
+// Lookup order: Defaults[af][ch] → Defaults[af][*any] → Defaults[*any][*any].
+func pickClientChannelDefault(af types.AFName, ch types.ChannelName) *ClientChannelConfig {
+	if chans, ok := DefaultClientConfig.AFSettings[af]; ok {
+		if def, ok := chans[ch]; ok {
+			return cloneClientChannelConfig(def)
+		}
+		for _, def := range chans {
+			return cloneClientChannelConfig(def)
 		}
 	}
-	if base == nil {
-		base = &ClientAFConfig{}
+	for _, chans := range DefaultClientConfig.AFSettings {
+		for _, def := range chans {
+			return cloneClientChannelConfig(def)
+		}
 	}
-	base.Name = afName
+	return &ClientChannelConfig{}
+}
+
+func overlayClientChannel(afName types.AFName, chName types.ChannelName, node *yaml.Node, dt *defaultTracker) (*ClientChannelConfig, error) {
+	base := pickClientChannelDefault(afName, chName)
+	base.AF = afName
+	base.Channel = chName
 	base.Controllers = nil
 
 	m := nodeMap(node)
@@ -219,7 +240,7 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 		return nil, err
 	}
 
-	// bind_addr vs autoip_interface (tracked via dt for bind_addr default)
+	// bind_addr vs autoip_interface
 	bindStr, _ := nodeString(m, "bind_addr")
 	autoIP, _ := nodeString(m, "autoip_interface")
 	hasBind := bindStr != ""
@@ -238,7 +259,7 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 	} else if hasAutoIP {
 		base.AutoIPInterface = autoIP
 		addrSelectStr, _ := nodeString(m, "addr_select")
-		script, err := resolveAddrSelect(addrSelectStr, name)
+		script, err := resolveAddrSelect(addrSelectStr, string(afName))
 		if err != nil {
 			return nil, err
 		}
@@ -273,6 +294,42 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 	return base, nil
 }
 
+// validateClientUniqueness enforces:
+//   - within an AF: bind_addr/autoip_interface unique across channels
+//   - across all AFs+channels: vxlan_name unique
+func validateClientUniqueness(afs map[types.AFName]map[types.ChannelName]*ClientChannelConfig) error {
+	vxlanNames := make(map[string]string) // vxlan_name -> "af/channel" of first occurrence
+	for af, chans := range afs {
+		bindSeen := make(map[string]types.ChannelName)
+		autoSeen := make(map[string]types.ChannelName)
+		for ch, cc := range chans {
+			if cc.BindAddr.IsValid() {
+				key := cc.BindAddr.String()
+				if prev, ok := bindSeen[key]; ok {
+					return fmt.Errorf("af %s: bind_addr %s duplicated in channels %s and %s",
+						af, key, prev, ch)
+				}
+				bindSeen[key] = ch
+			}
+			if cc.AutoIPInterface != "" {
+				if prev, ok := autoSeen[cc.AutoIPInterface]; ok {
+					return fmt.Errorf("af %s: autoip_interface %s duplicated in channels %s and %s",
+						af, cc.AutoIPInterface, prev, ch)
+				}
+				autoSeen[cc.AutoIPInterface] = ch
+			}
+			if cc.VxlanName != "" {
+				loc := fmt.Sprintf("%s/%s", af, ch)
+				if prev, ok := vxlanNames[cc.VxlanName]; ok {
+					return fmt.Errorf("vxlan_name %q duplicated: %s and %s", cc.VxlanName, prev, loc)
+				}
+				vxlanNames[cc.VxlanName] = loc
+			}
+		}
+	}
+	return nil
+}
+
 func cloneClientConfig(src *ClientConfig) *ClientConfig {
 	dst := *src
 	if src.NTPServers != nil {
@@ -280,15 +337,19 @@ func cloneClientConfig(src *ClientConfig) *ClientConfig {
 		copy(dst.NTPServers, src.NTPServers)
 	}
 	if src.AFSettings != nil {
-		dst.AFSettings = make(map[types.AFName]*ClientAFConfig, len(src.AFSettings))
-		for k, v := range src.AFSettings {
-			dst.AFSettings[k] = cloneClientAFConfig(v)
+		dst.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig, len(src.AFSettings))
+		for af, chans := range src.AFSettings {
+			inner := make(map[types.ChannelName]*ClientChannelConfig, len(chans))
+			for ch, v := range chans {
+				inner[ch] = cloneClientChannelConfig(v)
+			}
+			dst.AFSettings[af] = inner
 		}
 	}
 	return &dst
 }
 
-func cloneClientAFConfig(src *ClientAFConfig) *ClientAFConfig {
+func cloneClientChannelConfig(src *ClientChannelConfig) *ClientChannelConfig {
 	dst := *src
 	if src.Controllers != nil {
 		dst.Controllers = make([]ControllerEndpoint, len(src.Controllers))

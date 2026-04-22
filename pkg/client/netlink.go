@@ -17,6 +17,7 @@ import (
 // VxlanDev represents a VXLAN device.
 type VxlanDev struct {
 	AF       types.AFName
+	Channel  types.ChannelName
 	Name     string
 	VNI      uint32
 	MTU      int
@@ -30,34 +31,40 @@ func (c *Client) initDevices() error {
 		return fmt.Errorf("ensure bridge: %w", err)
 	}
 
-	// Step 2: Create VXLAN devices per AF
-	for afName, afCfg := range c.Config.AFSettings {
-		if !afCfg.Enable {
-			continue
-		}
-
-		bindAddr := afCfg.BindAddr.String()
-		if !afCfg.BindAddr.IsValid() {
-			// autoip_interface with no IP resolved yet; use unspecified addr
-			if strings.Contains(strings.ToLower(string(afName)), "v6") || strings.Contains(strings.ToLower(string(afName)), "ipv6") {
-				bindAddr = "::"
-			} else {
-				bindAddr = "0.0.0.0"
+	// Step 2: Create VXLAN devices per (af, channel)
+	for afName, chans := range c.Config.AFSettings {
+		for chName, cc := range chans {
+			if !cc.Enable {
+				continue
 			}
-		}
-		vd := &VxlanDev{
-			AF:       afName,
-			Name:     afCfg.VxlanName,
-			VNI:      afCfg.VxlanVNI,
-			MTU:      afCfg.VxlanMTU,
-			BindAddr: bindAddr,
-		}
 
-		if err := c.createVxlanDevice(vd, afCfg); err != nil {
-			return fmt.Errorf("create vxlan %s: %w", afName, err)
-		}
+			bindAddr := cc.BindAddr.String()
+			if !cc.BindAddr.IsValid() {
+				// autoip_interface with no IP resolved yet; use unspecified addr
+				if strings.Contains(strings.ToLower(string(afName)), "v6") || strings.Contains(strings.ToLower(string(afName)), "ipv6") {
+					bindAddr = "::"
+				} else {
+					bindAddr = "0.0.0.0"
+				}
+			}
+			vd := &VxlanDev{
+				AF:       afName,
+				Channel:  chName,
+				Name:     cc.VxlanName,
+				VNI:      cc.VxlanVNI,
+				MTU:      cc.VxlanMTU,
+				BindAddr: bindAddr,
+			}
 
-		c.VxlanDevs[afName] = vd
+			if err := c.createVxlanDevice(vd, cc); err != nil {
+				return fmt.Errorf("create vxlan %s/%s: %w", afName, chName, err)
+			}
+
+			if _, ok := c.VxlanDevs[afName]; !ok {
+				c.VxlanDevs[afName] = make(map[types.ChannelName]*VxlanDev)
+			}
+			c.VxlanDevs[afName][chName] = vd
+		}
 	}
 
 	// Step 3: Create tap-inject
@@ -80,10 +87,11 @@ func (c *Client) initDevices() error {
 	c.TapFD = tapFD
 
 	// Step 6: Flush bridge FDB on every configured vxlan device (enabled or
-	// not). Enabled AFs were just recreated above so this is a no-op for
-	// them; the real purpose is to drop stale entries on disabled AFs whose
-	// device persists from a previous run — without this, isLocalFDBEntry
-	// would treat those entries as local MACs and announce them upstream.
+	// not). Enabled (af, channel)s were just recreated above so this is a
+	// no-op for them; the real purpose is to drop stale entries on disabled
+	// ones whose device persists from a previous run — without this,
+	// isLocalFDBEntry would treat those entries as local MACs and announce
+	// them upstream.
 	c.flushVxlanFDB()
 
 	return nil
@@ -127,12 +135,12 @@ func (c *Client) flushDeviceFDB(name, expectedType string) {
 }
 
 // flushVxlanFDB clears bridge FDB on every vxlan device named in the config
-// (enabled or not). For enabled AFs the device was just recreated above so this
-// is a no-op; the real purpose is to drop stale entries on disabled AFs whose
-// device persists from a previous run.
+// (enabled or not).
 func (c *Client) flushVxlanFDB() {
-	for _, afCfg := range c.Config.AFSettings {
-		c.flushDeviceFDB(afCfg.VxlanName, "vxlan")
+	for _, chans := range c.Config.AFSettings {
+		for _, cc := range chans {
+			c.flushDeviceFDB(cc.VxlanName, "vxlan")
+		}
 	}
 }
 
@@ -140,8 +148,10 @@ func (c *Client) flushVxlanFDB() {
 // manages (enabled vxlans + tap-inject). Called from Stop() so we don't leave
 // stale entries behind for the next run to misclassify.
 func (c *Client) flushManagedFDB() {
-	for _, vd := range c.VxlanDevs {
-		c.flushDeviceFDB(vd.Name, "vxlan")
+	for _, chans := range c.VxlanDevs {
+		for _, vd := range chans {
+			c.flushDeviceFDB(vd.Name, "vxlan")
+		}
 	}
 	c.flushDeviceFDB(tapDeviceName, "")
 }
@@ -166,7 +176,7 @@ func (c *Client) ensureBridge() error {
 	return nil
 }
 
-func (c *Client) createVxlanDevice(vd *VxlanDev, afCfg *config.ClientAFConfig) error {
+func (c *Client) createVxlanDevice(vd *VxlanDev, cc *config.ClientChannelConfig) error {
 	// Remove existing device if present
 	if existing, err := netlink.LinkByName(vd.Name); err == nil {
 		netlink.LinkDel(existing)
@@ -178,14 +188,14 @@ func (c *Client) createVxlanDevice(vd *VxlanDev, afCfg *config.ClientAFConfig) e
 		"id", fmt.Sprintf("%d", vd.VNI),
 		"local", vd.BindAddr,
 		"ttl", "255",
-		"dstport", fmt.Sprintf("%d", afCfg.VxlanDstPort),
+		"dstport", fmt.Sprintf("%d", cc.VxlanDstPort),
 		"nolearning",
 		"udp6zerocsumrx",
 	}
-	if afCfg.VxlanSrcPortStart > 0 && afCfg.VxlanSrcPortEnd > 0 {
+	if cc.VxlanSrcPortStart > 0 && cc.VxlanSrcPortEnd > 0 {
 		args = append(args, "srcport",
-			fmt.Sprintf("%d", afCfg.VxlanSrcPortStart),
-			fmt.Sprintf("%d", afCfg.VxlanSrcPortEnd))
+			fmt.Sprintf("%d", cc.VxlanSrcPortStart),
+			fmt.Sprintf("%d", cc.VxlanSrcPortEnd))
 	}
 
 	cmd := exec.Command("ip", args...)
@@ -282,17 +292,19 @@ func (c *Client) buildMSSRuleset() string {
 	sb.WriteString(fmt.Sprintf("table bridge %s {\n", c.Config.ClampMSSTable))
 	sb.WriteString("    chain forward {\n")
 	sb.WriteString("        type filter hook forward priority filter; policy accept;\n")
-	for _, vd := range c.VxlanDevs {
-		mtu := vd.MTU
-		if mtu <= 0 {
-			mtu = 1400
+	for _, chans := range c.VxlanDevs {
+		for _, vd := range chans {
+			mtu := vd.MTU
+			if mtu <= 0 {
+				mtu = 1400
+			}
+			mss4 := mtu - 40 // IPv4: 20 IP + 20 TCP
+			mss6 := mtu - 60 // IPv6: 40 IP + 20 TCP
+			fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
+			fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
+			fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
+			fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
 		}
-		mss4 := mtu - 40 // IPv4: 20 IP + 20 TCP
-		mss6 := mtu - 60 // IPv6: 40 IP + 20 TCP
-		fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
-		fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss4)
-		fmt.Fprintf(&sb, "        oifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
-		fmt.Fprintf(&sb, "        iifname \"%s\" ether type ip6 tcp flags syn tcp option maxseg size set %d\n", vd.Name, mss6)
 	}
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n")
@@ -318,10 +330,14 @@ func (c *Client) cleanupNftables() {
 	exec.Command("nft", "delete", "table", "bridge", c.Config.ClampMSSTable).Run()
 }
 
-func (c *Client) updateVxlanBindAddr(af types.AFName, newAddr string) error {
-	vd, ok := c.VxlanDevs[af]
+func (c *Client) updateVxlanBindAddr(af types.AFName, ch types.ChannelName, newAddr string) error {
+	chans, ok := c.VxlanDevs[af]
 	if !ok {
 		return fmt.Errorf("no vxlan device for AF %s", af)
+	}
+	vd, ok := chans[ch]
+	if !ok {
+		return fmt.Errorf("no vxlan device for AF=%s channel=%s", af, ch)
 	}
 
 	cmd := exec.Command("ip", "link", "set", vd.Name, "type", "vxlan", "local", newAddr)

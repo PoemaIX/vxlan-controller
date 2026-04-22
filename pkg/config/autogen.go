@@ -28,21 +28,69 @@ type AutogenConfig struct {
 	Priority          int     `yaml:"priority"`
 	ForwardCost       float64 `yaml:"forward_cost"`
 
-	Nodes       map[string]map[string]AutogenAF `yaml:"nodes"`
-	Controllers []string                        `yaml:"controllers"`
-	Clients     []string                        `yaml:"clients"`
-	WebUI       *AutogenWebUI                   `yaml:"web_ui"`
+	// Nodes[nodeName][afName][channelName] = endpoint config.
+	// YAML shorthand: a scalar or a map with "bind" key is treated as a single
+	// channel named types.DefaultChannelName.
+	Nodes       map[string]map[string]AutogenAFChannels `yaml:"nodes"`
+	Controllers []string                                `yaml:"controllers"`
+	Clients     []string                                `yaml:"clients"`
+	WebUI       *AutogenWebUI                           `yaml:"web_ui"`
 }
 
 type AutogenWebUI struct {
-	BindAddr string                   `yaml:"bind_addr"`
-	Title    string                   `yaml:"title"`
-	URL      string                   `yaml:"url"`
-	Nodes    map[string]*WebUINode    `yaml:"nodes"`
+	BindAddr string                `yaml:"bind_addr"`
+	Title    string                `yaml:"title"`
+	URL      string                `yaml:"url"`
+	Nodes    map[string]*WebUINode `yaml:"nodes"`
 }
 
-// AutogenAF represents a per-AF bind config.
-// Supports shorthand "v4: 1.2.3.4" or full form "v4: {bind: eth3, ddns: host.example.com}".
+// AutogenAFChannels holds per-channel configs for a single AF of a single node.
+// Accepts three YAML forms:
+//  1. scalar:            "1.2.3.4"           → {DefaultChannel: {Bind: "1.2.3.4"}}
+//  2. single-AF object:  "{bind: eth3}"      → {DefaultChannel: {Bind: "eth3"}}
+//  3. channel map:       "{ISP1: ..., ISP2: ...}"
+type AutogenAFChannels map[types.ChannelName]*AutogenAF
+
+func (a *AutogenAFChannels) UnmarshalYAML(value *yaml.Node) error {
+	*a = make(AutogenAFChannels)
+	switch value.Kind {
+	case yaml.ScalarNode:
+		(*a)[types.DefaultChannelName] = &AutogenAF{Bind: value.Value}
+		return nil
+	case yaml.MappingNode:
+		// Peek keys: if "bind" (or "ddns") is a top-level key, treat as single-channel shorthand.
+		isShorthand := false
+		for i := 0; i < len(value.Content); i += 2 {
+			k := value.Content[i].Value
+			if k == "bind" || k == "ddns" {
+				isShorthand = true
+				break
+			}
+		}
+		if isShorthand {
+			var af AutogenAF
+			if err := value.Decode(&af); err != nil {
+				return err
+			}
+			(*a)[types.DefaultChannelName] = &af
+			return nil
+		}
+		// Channel map form
+		type plain map[types.ChannelName]*AutogenAF
+		var chans plain
+		if err := value.Decode(&chans); err != nil {
+			return err
+		}
+		for ch, af := range chans {
+			(*a)[ch] = af
+		}
+		return nil
+	}
+	return fmt.Errorf("unexpected YAML kind for AF channels: %v", value.Kind)
+}
+
+// AutogenAF represents a per-channel bind config.
+// Supports shorthand "ISP1: 1.2.3.4" or full form "ISP1: {bind: eth3, ddns: host.example.com}".
 type AutogenAF struct {
 	Bind string `yaml:"bind"`
 	DDNS string `yaml:"ddns,omitempty"`
@@ -130,11 +178,13 @@ func Autogen(path string) error {
 		keys[name] = &autogenNodeKeys{Priv: priv, Pub: pub}
 	}
 
-	// Validate controller AFs have reachable endpoints
+	// Validate controller (af, channel) have reachable endpoints
 	for _, name := range ag.Controllers {
-		for afName, af := range ag.Nodes[name] {
-			if _, err := af.Endpoint(); err != nil {
-				return fmt.Errorf("controller %q AF %s: %w", name, afName, err)
+		for afName, chans := range ag.Nodes[name] {
+			for chName, af := range chans {
+				if _, err := af.Endpoint(); err != nil {
+					return fmt.Errorf("controller %q AF %s channel %s: %w", name, afName, chName, err)
+				}
 			}
 		}
 	}
@@ -176,24 +226,29 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 
 	cfg.PrivateKey = k.Priv
 
-	// AF settings from this node's AFs
-	cfg.AFSettings = make(map[types.AFName]*ControllerAFConfig)
-	for afName, af := range ag.Nodes[name] {
-		afCfg := &ControllerAFConfig{
-			Name:              types.AFName(afName),
-			Enable:            true,
-			CommunicationPort: ag.CommunicationPort,
-			VxlanVNI:          ag.VxlanVNI,
-			VxlanDstPort:      ag.VxlanDstPort,
-			VxlanSrcPortStart: ag.VxlanSrcPortStart,
-			VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
+	// AF settings from this node's (af, channel) pairs
+	cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ControllerChannelConfig)
+	for afName, chans := range ag.Nodes[name] {
+		inner := make(map[types.ChannelName]*ControllerChannelConfig, len(chans))
+		for chName, af := range chans {
+			cc := &ControllerChannelConfig{
+				AF:                types.AFName(afName),
+				Channel:           chName,
+				Enable:            true,
+				CommunicationPort: ag.CommunicationPort,
+				VxlanVNI:          ag.VxlanVNI,
+				VxlanDstPort:      ag.VxlanDstPort,
+				VxlanSrcPortStart: ag.VxlanSrcPortStart,
+				VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
+			}
+			if af.IsAutoIP() {
+				cc.AutoIPInterface = af.Bind
+			} else {
+				cc.BindAddr = netip.MustParseAddr(af.Bind)
+			}
+			inner[chName] = cc
 		}
-		if af.IsAutoIP() {
-			afCfg.AutoIPInterface = af.Bind
-		} else {
-			afCfg.BindAddr = netip.MustParseAddr(af.Bind)
-		}
-		cfg.AFSettings[types.AFName(afName)] = afCfg
+		cfg.AFSettings[types.AFName(afName)] = inner
 	}
 
 	// WebUI config
@@ -226,16 +281,24 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 			ClientID:   types.ClientID(ck.Pub),
 			ClientName: clientName,
 		}
+		// If this controller is also the client, carry its DDNS overrides.
 		if clientName == name {
-			for afName, af := range ag.Nodes[clientName] {
-				if af.DDNS == "" {
-					continue
-				}
-				if pc.AFSettings == nil {
-					pc.AFSettings = make(map[types.AFName]*types.PerClientAFConfig)
-				}
-				pc.AFSettings[types.AFName(afName)] = &types.PerClientAFConfig{
-					EndpointOverride: af.DDNS,
+			for afName, chans := range ag.Nodes[clientName] {
+				for chName, af := range chans {
+					if af.DDNS == "" {
+						continue
+					}
+					if pc.AFSettings == nil {
+						pc.AFSettings = make(map[types.AFName]map[types.ChannelName]*types.PerClientChannelConfig)
+					}
+					inner, ok := pc.AFSettings[types.AFName(afName)]
+					if !ok {
+						inner = make(map[types.ChannelName]*types.PerClientChannelConfig)
+						pc.AFSettings[types.AFName(afName)] = inner
+					}
+					inner[chName] = &types.PerClientChannelConfig{
+						EndpointOverride: af.DDNS,
+					}
 				}
 			}
 		}
@@ -258,49 +321,58 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 		cfg.VxlanFirewall = *ag.VxlanFirewall
 	}
 
-	// AF settings from this node's AFs
-	cfg.AFSettings = make(map[types.AFName]*ClientAFConfig)
-	for afName, af := range ag.Nodes[name] {
-		afCfg := &ClientAFConfig{
-			Name:              types.AFName(afName),
-			Enable:            true,
-			ProbePort:         ag.ProbePort,
-			VxlanName:         ag.VxlanNamePrefix + afName,
-			VxlanVNI:          ag.VxlanVNI,
-			VxlanMTU:          ag.VxlanMTU,
-			VxlanDstPort:      ag.VxlanDstPort,
-			VxlanSrcPortStart: ag.VxlanSrcPortStart,
-			VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
-			Priority:          ag.Priority,
-			ForwardCost:       ag.ForwardCost,
-		}
-		if af.IsAutoIP() {
-			afCfg.AutoIPInterface = af.Bind
-		} else {
-			afCfg.BindAddr = netip.MustParseAddr(af.Bind)
-		}
-
-		// Add controllers that have this AF
-		for _, ctrlName := range ag.Controllers {
-			ctrlAF, ok := ag.Nodes[ctrlName][afName]
-			if !ok {
-				continue
+	// AF settings from this node's (af, channel) pairs
+	cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig)
+	for afName, chans := range ag.Nodes[name] {
+		inner := make(map[types.ChannelName]*ClientChannelConfig, len(chans))
+		for chName, af := range chans {
+			cc := &ClientChannelConfig{
+				AF:                types.AFName(afName),
+				Channel:           chName,
+				Enable:            true,
+				ProbePort:         ag.ProbePort,
+				VxlanName:         ag.VxlanNamePrefix + afName + "-" + string(chName),
+				VxlanVNI:          ag.VxlanVNI,
+				VxlanMTU:          ag.VxlanMTU,
+				VxlanDstPort:      ag.VxlanDstPort,
+				VxlanSrcPortStart: ag.VxlanSrcPortStart,
+				VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
+				Priority:          ag.Priority,
+				ForwardCost:       ag.ForwardCost,
 			}
-			var addr string
-			if ctrlName == name {
-				addr = ctrlAF.Bind
+			if af.IsAutoIP() {
+				cc.AutoIPInterface = af.Bind
 			} else {
-				addr, _ = ctrlAF.Endpoint() // already validated
+				cc.BindAddr = netip.MustParseAddr(af.Bind)
 			}
-			ck := keys[ctrlName]
-			ap, _ := netip.ParseAddrPort(formatAddrPort(addr, ag.CommunicationPort))
-			afCfg.Controllers = append(afCfg.Controllers, ControllerEndpoint{
-				PubKey: ck.Pub,
-				Addr:   ap,
-			})
-		}
 
-		cfg.AFSettings[types.AFName(afName)] = afCfg
+			// Add controllers that have this (af, channel)
+			for _, ctrlName := range ag.Controllers {
+				ctrlChans, ok := ag.Nodes[ctrlName][afName]
+				if !ok {
+					continue
+				}
+				ctrlAF, ok := ctrlChans[chName]
+				if !ok {
+					continue
+				}
+				var addr string
+				if ctrlName == name {
+					addr = ctrlAF.Bind
+				} else {
+					addr, _ = ctrlAF.Endpoint() // already validated
+				}
+				ck := keys[ctrlName]
+				ap, _ := netip.ParseAddrPort(formatAddrPort(addr, ag.CommunicationPort))
+				cc.Controllers = append(cc.Controllers, ControllerEndpoint{
+					PubKey: ck.Pub,
+					Addr:   ap,
+				})
+			}
+
+			inner[chName] = cc
+		}
+		cfg.AFSettings[types.AFName(afName)] = inner
 	}
 
 	return cfg

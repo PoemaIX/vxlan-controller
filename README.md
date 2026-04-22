@@ -10,6 +10,7 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
 
 - **Dual-stack**: IPv4 and IPv6 underlay, with cross-AF transit routing
 - **Multi-AF design**: Beyond v4/v6, supports arbitrary address families (e.g. `asia_v4`, `europe_v4`) for regional topologies
+- **Multi-channel per AF**: Each AF can hold multiple channels (e.g. `ISP1`, `ISP2`) with independent bind addresses and VXLAN devices, for redundant uplinks or per-carrier policies
 - **WireGuard-style encryption**: Noise IK handshake (X25519 + ChaCha20-Poly1305) on all control plane traffic. data plane uses plain vxlan.
 - **Controller failover**: Clients connect to multiple controllers, automatically switch on failure
 - **Broadcast relay**: Controller relays ARP/ND across all AF listeners, no multicast FDB needed
@@ -33,12 +34,13 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
        │ VXLAN
        │ FDB entries
        ▼
-┌──────────────┐
-│  br-vxlan    │
-│  ├ vxlan-v4  │
-│  ├ vxlan-v6  │
-│  └ tap-inject│
-└──────────────┘
+┌─────────────────────┐
+│  br-vxlan           │
+│  ├ vxlan-v4-ISP1    │  ← one device per (AF, channel)
+│  ├ vxlan-v4-ISP2    │
+│  ├ vxlan-v6-ISP1    │
+│  └ tap-inject       │
+└─────────────────────┘
 ```
 
 ## Build
@@ -104,6 +106,16 @@ This generates `tokyo.controller.yaml`, `tokyo.client.yaml`, `osaka.controller.y
 - `bind` — local address the process listens on (`bind_addr` or `autoip_interface` if it's an interface name)
 - `ddns` — address clients use to connect to this controller (IP, hostname, or DDNS). Defaults to `bind` if bind is a static IP. Required when controller uses `autoip_interface`.
 
+**Multi-channel**: a scalar or `{bind, ddns}` under an AF is treated as a single channel named `ISP1`. For redundant uplinks, use an explicit channel map:
+
+```yaml
+nodes:
+  siteA:
+    v4:
+      ISP1: 10.1.1.1
+      ISP2: 10.2.1.1
+```
+
 ## Key Generation
 
 Compatible with WireGuard key format:
@@ -131,9 +143,10 @@ vxscli cost setmode static          # switch to static cost mode
 vxscli cost store                   # save current probed costs to config
 
 # Client CLI
-vxccli af list                      # list address families and bind addresses
-vxccli af get v4                    # get bind address for an AF
-vxccli af set v4 192.168.1.100      # set bind address (non-autoip only)
+vxccli af list                      # list (af, channel) pairs and bind addresses
+vxccli af get v4                    # get bind address for all channels of an AF
+vxccli af get v4 ISP1               # get bind address for a specific channel
+vxccli af set v4 ISP1 192.168.1.100 # set bind address for a channel (non-autoip only)
 ```
 
 Or without symlinks: `vxlan-controller --mode vxscli cost get`
@@ -173,21 +186,30 @@ log_level: "info"
 api_socket: "/var/run/vxlan-client.sock"
 address_families:
   v4:
-    enable: true
-    bind_addr: "192.168.1.100"       # or use autoip_interface instead
-    # autoip_interface: "eth0"       # auto-detect IP from interface
-    # addr_select: |                 # inline Lua, or path to .lua file
-    #   function select(info) ... end
-    probe_port: 5010
-    additional_cost: 20
-    vxlan_name: "vxlan-v4"
-    vxlan_vni: 100
-    vxlan_mtu: 1400
-    vxlan_dst_port: 4789
-    controllers:
-      - pubkey: "<controller pubkey>"
-        addr: "10.0.0.1:5000"
+    ISP1:                             # channel name (unique per AF)
+      enable: true
+      bind_addr: "192.168.1.100"      # or use autoip_interface instead
+      # autoip_interface: "eth0"      # auto-detect IP from interface
+      # addr_select: |                # inline Lua, or path to .lua file
+      #   function select(info) ... end
+      probe_port: 5010
+      additional_cost: 20
+      vxlan_name: "vxlan-v4-ISP1"     # must be unique across all (af, channel)
+      vxlan_vni: 100
+      vxlan_mtu: 1400
+      vxlan_dst_port: 4789
+      controllers:
+        - pubkey: "<controller pubkey>"
+          addr: "10.0.0.1:5000"
+    # ISP2:                           # second uplink on the same AF (optional)
+    #   enable: true
+    #   bind_addr: "192.168.2.100"
+    #   ...
 ```
+
+Each `(af, channel)` pair maps to its own VXLAN device, bind address, probe
+session, and noise handshake. `vxlan_name` must be unique across the entire
+client; `bind_addr` / `autoip_interface` must be unique within an AF.
 
 ### Controller (`controller.yaml`)
 
@@ -207,20 +229,24 @@ web_ui:
   bind_addr: ":8080"
 address_families:
   v4:
-    enable: true
-    bind_addr: "0.0.0.0"
-    communication_port: 5000
+    ISP1:
+      enable: true
+      bind_addr: "0.0.0.0"
+      communication_port: 5000
   v6:
-    enable: true
-    bind_addr: "::"
-    communication_port: 5000
+    ISP1:
+      enable: true
+      bind_addr: "::"
+      communication_port: 5000
 allowed_clients:
   - client_id: "<client pubkey>"
     client_name: "node-1"
 # static_costs:                      # populated by "vxscli cost store"
 #   node-1:
 #     node-2:
-#       v4: 12.5
+#       v4:
+#         ISP1: 12.5
+#         ISP2: 18.0
 ```
 
 ## Modes
@@ -238,10 +264,11 @@ vxlan-controller --mode <mode> [options]
 
 ## Tests
 
-Integration tests require root (network namespaces). 10 test suites:
+Integration tests require root (network namespaces), except `test_multichannel_autogen.sh`:
 
 | # | Test | Description |
 |---|------|-------------|
+| 0 | `test_multichannel_autogen.sh` | Multi-channel autogen smoke test (no root) |
 | 1 | `test_connectivity.sh` | Full mesh 30-pair ping (6 nodes) |
 | 2 | `test_neigh_suppress.sh` | ARP suppression with priming |
 | 3 | `test_controller_failover.sh` | Kill/restore both controllers |

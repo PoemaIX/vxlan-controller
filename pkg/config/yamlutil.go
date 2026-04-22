@@ -249,7 +249,11 @@ func MarshalClientConfig(cfg *ClientConfig) ([]byte, error) {
 
 	afs := newYAMLMap()
 	for _, name := range sortedAFNames(cfg.AFSettings) {
-		afs.SetNode(string(name), marshalClientAF(cfg.AFSettings[name]))
+		chans := newYAMLMap()
+		for _, ch := range sortedChannelNames(cfg.AFSettings[name]) {
+			chans.SetNode(string(ch), marshalClientChannel(cfg.AFSettings[name][ch]))
+		}
+		afs.SetNode(string(name), chans.node)
 	}
 	m.SetNode("address_families", afs.node)
 
@@ -268,28 +272,28 @@ func MarshalClientConfig(cfg *ClientConfig) ([]byte, error) {
 	return m.Marshal()
 }
 
-func marshalClientAF(af *ClientAFConfig) *yaml.Node {
+func marshalClientChannel(cc *ClientChannelConfig) *yaml.Node {
 	m := newYAMLMap()
-	m.Set("enable", af.Enable)
-	if af.AutoIPInterface != "" {
-		m.Set("autoip_interface", af.AutoIPInterface)
+	m.Set("enable", cc.Enable)
+	if cc.AutoIPInterface != "" {
+		m.Set("autoip_interface", cc.AutoIPInterface)
 	} else {
-		m.Set("bind_addr", af.BindAddr.String())
+		m.Set("bind_addr", cc.BindAddr.String())
 	}
-	m.Set("probe_port", af.ProbePort)
-	m.Set("communication_port", af.CommunicationPort)
-	m.Set("vxlan_name", af.VxlanName)
-	m.Set("vxlan_vni", af.VxlanVNI)
-	m.Set("vxlan_mtu", af.VxlanMTU)
-	m.Set("vxlan_dst_port", af.VxlanDstPort)
-	m.Set("vxlan_src_port_start", af.VxlanSrcPortStart)
-	m.Set("vxlan_src_port_end", af.VxlanSrcPortEnd)
-	m.Set("priority", af.Priority)
-	m.Set("forward_cost", af.ForwardCost)
+	m.Set("probe_port", cc.ProbePort)
+	m.Set("communication_port", cc.CommunicationPort)
+	m.Set("vxlan_name", cc.VxlanName)
+	m.Set("vxlan_vni", cc.VxlanVNI)
+	m.Set("vxlan_mtu", cc.VxlanMTU)
+	m.Set("vxlan_dst_port", cc.VxlanDstPort)
+	m.Set("vxlan_src_port_start", cc.VxlanSrcPortStart)
+	m.Set("vxlan_src_port_end", cc.VxlanSrcPortEnd)
+	m.Set("priority", cc.Priority)
+	m.Set("forward_cost", cc.ForwardCost)
 
-	if len(af.Controllers) > 0 {
+	if len(cc.Controllers) > 0 {
 		seq := &yaml.Node{Kind: yaml.SequenceNode}
-		for _, ce := range af.Controllers {
+		for _, ce := range cc.Controllers {
 			cm := newYAMLMap()
 			cm.Set("pubkey", base64KeyString(ce.PubKey))
 			cm.Set("addr", ce.Addr.String())
@@ -319,7 +323,11 @@ func MarshalControllerConfig(cfg *ControllerConfig) ([]byte, error) {
 
 	afs := newYAMLMap()
 	for _, name := range sortedAFNames(cfg.AFSettings) {
-		afs.SetNode(string(name), marshalControllerAF(cfg.AFSettings[name]))
+		chans := newYAMLMap()
+		for _, ch := range sortedChannelNames(cfg.AFSettings[name]) {
+			chans.SetNode(string(ch), marshalControllerChannel(cfg.AFSettings[name][ch]))
+		}
+		afs.SetNode(string(name), chans.node)
 	}
 	m.SetNode("address_families", afs.node)
 
@@ -342,19 +350,19 @@ func MarshalControllerConfig(cfg *ControllerConfig) ([]byte, error) {
 	return m.Marshal()
 }
 
-func marshalControllerAF(af *ControllerAFConfig) *yaml.Node {
+func marshalControllerChannel(cc *ControllerChannelConfig) *yaml.Node {
 	m := newYAMLMap()
-	m.Set("enable", af.Enable)
-	if af.AutoIPInterface != "" {
-		m.Set("autoip_interface", af.AutoIPInterface)
+	m.Set("enable", cc.Enable)
+	if cc.AutoIPInterface != "" {
+		m.Set("autoip_interface", cc.AutoIPInterface)
 	} else {
-		m.Set("bind_addr", af.BindAddr.String())
+		m.Set("bind_addr", cc.BindAddr.String())
 	}
-	m.Set("communication_port", af.CommunicationPort)
-	m.Set("vxlan_vni", af.VxlanVNI)
-	m.Set("vxlan_dst_port", af.VxlanDstPort)
-	m.Set("vxlan_src_port_start", af.VxlanSrcPortStart)
-	m.Set("vxlan_src_port_end", af.VxlanSrcPortEnd)
+	m.Set("communication_port", cc.CommunicationPort)
+	m.Set("vxlan_vni", cc.VxlanVNI)
+	m.Set("vxlan_dst_port", cc.VxlanDstPort)
+	m.Set("vxlan_src_port_start", cc.VxlanSrcPortStart)
+	m.Set("vxlan_src_port_end", cc.VxlanSrcPortEnd)
 	return m.node
 }
 
@@ -370,6 +378,15 @@ func marshalPerClient(pc *types.PerClientConfig) *yaml.Node {
 
 func sortedAFNames[V any](m map[types.AFName]V) []types.AFName {
 	names := make([]types.AFName, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+	return names
+}
+
+func sortedChannelNames[V any](m map[types.ChannelName]V) []types.ChannelName {
+	names := make([]types.ChannelName, 0, len(m))
 	for name := range m {
 		names = append(names, name)
 	}

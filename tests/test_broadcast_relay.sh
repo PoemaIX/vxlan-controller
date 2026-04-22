@@ -44,7 +44,7 @@ echo ""
 echo "  Checking: no broadcast FDB entries on vxlan devices..."
 has_bcast_fdb=false
 for i in 1 2 3 4 5 6; do
-    for dev in vxlan-v4 vxlan-v6; do
+    for dev in vxlan-v4-ISP1 vxlan-v6-ISP1; do
         bcast=$(ip netns exec "node-$i" bridge fdb show dev "$dev" 2>/dev/null | grep "ff:ff:ff:ff:ff:ff" || true)
         if [ -n "$bcast" ]; then
             echo "    WARNING: node-$i $dev has broadcast FDB: $bcast"

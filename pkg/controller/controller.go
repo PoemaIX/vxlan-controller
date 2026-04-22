@@ -35,15 +35,15 @@ type Controller struct {
 	mu    sync.Mutex
 	State *ControllerState
 
-	// Per-AF listeners
-	afListeners map[types.AFName]*AFListener
+	// Per-(AF, channel) listeners
+	afListeners map[types.AFName]map[types.ChannelName]*AFListener
 
 	// Per-Client connection management
 	clients map[types.ClientID]*ClientConn
 
 	// Session manager for UDP
 	udpSessions *crypto.SessionManager
-	// Track client UDP addresses per AF (from handshake source addr)
+	// Track client UDP addresses per (af, channel)
 	udpAddrs map[udpAddrKey]*net.UDPAddr
 
 	// Debounce timers
@@ -69,22 +69,24 @@ type Controller struct {
 	// Client-reported multicast stats for WebUI
 	clientMcastStats map[types.ClientID]*ClientMcastStats
 
-	// Addr watch engines for autoip_interface
-	addrEngines map[types.AFName]*filter.AddrSelectEngine
+	// Addr watch engines for autoip_interface, per (af, channel)
+	addrEngines map[types.AFName]map[types.ChannelName]*filter.AddrSelectEngine
 
 	// Cost mode: "probe" or "static"
 	CostMode        string
-	staticCostsByID map[types.ClientID]map[types.ClientID]map[types.AFName]float64
+	staticCostsByID map[types.ClientID]map[types.ClientID]map[types.AFName]map[types.ChannelName]float64
 }
 
 type udpAddrKey struct {
 	ClientID types.ClientID
 	AF       types.AFName
+	Channel  types.ChannelName
 }
 
-// AFListener manages TCP + UDP on a single AF.
+// AFListener manages TCP + UDP on a single (AF, channel).
 type AFListener struct {
 	AF          types.AFName
+	Channel     types.ChannelName
 	BindAddr    netip.Addr
 	Port        uint16
 	TCPListener net.Listener
@@ -101,7 +103,7 @@ func New(cfg *config.ControllerConfig) *Controller {
 		PrivateKey:       cfg.PrivateKey,
 		ControllerID:     pubKey,
 		State:            newControllerState(),
-		afListeners:      make(map[types.AFName]*AFListener),
+		afListeners:      make(map[types.AFName]map[types.ChannelName]*AFListener),
 		clients:          make(map[types.ClientID]*ClientConn),
 		udpSessions:      crypto.NewSessionManager(),
 		udpAddrs:         make(map[udpAddrKey]*net.UDPAddr),
@@ -124,17 +126,22 @@ func New(cfg *config.ControllerConfig) *Controller {
 		c.staticCostsByID = c.resolveStaticCosts(cfg.StaticCosts)
 	}
 
-	// Init addr select engines for AFs with AutoIPInterface
-	c.addrEngines = make(map[types.AFName]*filter.AddrSelectEngine)
-	for afName, afCfg := range cfg.AFSettings {
-		if afCfg.AutoIPInterface == "" {
-			continue
+	// Init addr select engines for (af, channel) with AutoIPInterface
+	c.addrEngines = make(map[types.AFName]map[types.ChannelName]*filter.AddrSelectEngine)
+	for afName, chans := range cfg.AFSettings {
+		for chName, cc := range chans {
+			if cc.AutoIPInterface == "" {
+				continue
+			}
+			engine, err := filter.NewAddrSelectEngine(cc.AddrSelectScript)
+			if err != nil {
+				vlog.Fatalf("[Controller] AF=%s channel=%s: failed to init addr select engine: %v", afName, chName, err)
+			}
+			if _, ok := c.addrEngines[afName]; !ok {
+				c.addrEngines[afName] = make(map[types.ChannelName]*filter.AddrSelectEngine)
+			}
+			c.addrEngines[afName][chName] = engine
 		}
-		engine, err := filter.NewAddrSelectEngine(afCfg.AddrSelectScript)
-		if err != nil {
-			vlog.Fatalf("[Controller] AF=%s: failed to init addr select engine: %v", afName, err)
-		}
-		c.addrEngines[afName] = engine
 	}
 
 	return c
@@ -143,24 +150,28 @@ func New(cfg *config.ControllerConfig) *Controller {
 func (c *Controller) Run() error {
 	vlog.Infof("[Controller] starting, ID=%s", c.ControllerID.Hex())
 
-	// Resolve initial bind addrs for AFs with autoip_interface
-	for afName, afCfg := range c.Config.AFSettings {
-		if afCfg.AutoIPInterface != "" {
-			c.resolveInitialBindAddr(afName)
+	// Resolve initial bind addrs for (af, channel) with autoip_interface
+	for afName, chans := range c.Config.AFSettings {
+		for chName, cc := range chans {
+			if cc.AutoIPInterface != "" {
+				c.resolveInitialBindAddr(afName, chName)
+			}
 		}
 	}
 
-	// Start AF listeners
-	for afName, afCfg := range c.Config.AFSettings {
-		if !afCfg.Enable {
-			continue
-		}
-		if !afCfg.BindAddr.IsValid() {
-			vlog.Warnf("[Controller] AF=%s: no bind_addr resolved yet, skipping listener start (will start on addr change)", afName)
-			continue
-		}
-		if err := c.startAFListener(afName, afCfg); err != nil {
-			return fmt.Errorf("start AF listener %s: %w", afName, err)
+	// Start (af, channel) listeners
+	for afName, chans := range c.Config.AFSettings {
+		for chName, cc := range chans {
+			if !cc.Enable {
+				continue
+			}
+			if !cc.BindAddr.IsValid() {
+				vlog.Warnf("[Controller] AF=%s channel=%s: no bind_addr resolved yet, skipping listener start", afName, chName)
+				continue
+			}
+			if err := c.startAFListener(afName, chName, cc); err != nil {
+				return fmt.Errorf("start listener %s/%s: %w", afName, chName, err)
+			}
 		}
 	}
 
@@ -187,17 +198,21 @@ func (c *Controller) Stop() {
 	c.cancel()
 
 	// Close addr select engines
-	for _, engine := range c.addrEngines {
-		engine.Close()
+	for _, chans := range c.addrEngines {
+		for _, engine := range chans {
+			engine.Close()
+		}
 	}
 
 	// Close all listeners
-	for _, al := range c.afListeners {
-		if al.TCPListener != nil {
-			al.TCPListener.Close()
-		}
-		if al.UDPConn != nil {
-			al.UDPConn.Close()
+	for _, chans := range c.afListeners {
+		for _, al := range chans {
+			if al.TCPListener != nil {
+				al.TCPListener.Close()
+			}
+			if al.UDPConn != nil {
+				al.UDPConn.Close()
+			}
 		}
 	}
 
@@ -205,18 +220,20 @@ func (c *Controller) Stop() {
 	c.mu.Lock()
 	for _, cc := range c.clients {
 		close(cc.SendQueue)
-		for _, afc := range cc.AFConns {
-			if afc.TCPConn != nil {
-				afc.TCPConn.Close()
+		for _, chans := range cc.AFConns {
+			for _, afc := range chans {
+				if afc.TCPConn != nil {
+					afc.TCPConn.Close()
+				}
+				afc.CloseDone()
 			}
-			afc.CloseDone()
 		}
 	}
 	c.mu.Unlock()
 }
 
-func (c *Controller) startAFListener(afName types.AFName, afCfg *config.ControllerAFConfig) error {
-	bindStr := netip.AddrPortFrom(afCfg.BindAddr, afCfg.CommunicationPort).String()
+func (c *Controller) startAFListener(afName types.AFName, chName types.ChannelName, cc *config.ControllerChannelConfig) error {
+	bindStr := netip.AddrPortFrom(cc.BindAddr, cc.CommunicationPort).String()
 
 	// TCP listener
 	tcpListener, err := net.Listen("tcp", bindStr)
@@ -237,15 +254,19 @@ func (c *Controller) startAFListener(afName types.AFName, afCfg *config.Controll
 
 	al := &AFListener{
 		AF:          afName,
-		BindAddr:    afCfg.BindAddr,
-		Port:        afCfg.CommunicationPort,
+		Channel:     chName,
+		BindAddr:    cc.BindAddr,
+		Port:        cc.CommunicationPort,
 		TCPListener: tcpListener,
 		UDPConn:     udpConn,
 		UDPSessions: crypto.NewSessionManager(),
 	}
-	c.afListeners[afName] = al
+	if _, ok := c.afListeners[afName]; !ok {
+		c.afListeners[afName] = make(map[types.ChannelName]*AFListener)
+	}
+	c.afListeners[afName][chName] = al
 
-	vlog.Infof("[Controller] listening on %s (AF=%s)", bindStr, afName)
+	vlog.Infof("[Controller] listening on %s (AF=%s channel=%s)", bindStr, afName, chName)
 
 	go c.tcpAcceptLoop(al)
 	go c.udpReadLoop(al)
@@ -261,7 +282,7 @@ func (c *Controller) tcpAcceptLoop(al *AFListener) {
 			case <-c.ctx.Done():
 				return
 			default:
-				vlog.Errorf("[Controller] TCP accept error on %s: %v", al.AF, err)
+				vlog.Errorf("[Controller] TCP accept error on %s/%s: %v", al.AF, al.Channel, err)
 				continue
 			}
 		}
@@ -272,15 +293,15 @@ func (c *Controller) tcpAcceptLoop(al *AFListener) {
 			tc.SetKeepAlivePeriod(keepAlivePeriod)
 		}
 
-		go c.handleTCPConn(al.AF, conn)
+		go c.handleTCPConn(al.AF, al.Channel, conn)
 	}
 }
 
-func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
+func (c *Controller) handleTCPConn(af types.AFName, ch types.ChannelName, conn net.Conn) {
 	defer conn.Close()
 
 	remoteIP := addrFromConn(conn)
-	vlog.Infof("[Controller] new TCP connection from %s on AF=%s", conn.RemoteAddr(), af)
+	vlog.Infof("[Controller] new TCP connection from %s on AF=%s channel=%s", conn.RemoteAddr(), af, ch)
 
 	// Step 1: Noise IK handshake
 	localIndex := c.udpSessions.AllocateIndex()
@@ -306,7 +327,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 
 	session.IsUDP = false
 	clientID := types.ClientID(session.PeerID)
-	vlog.Debugf("[Controller] handshake completed with client %s on AF=%s", clientID.Hex()[:8], af)
+	vlog.Debugf("[Controller] handshake completed with client %s on AF=%s channel=%s", clientID.Hex()[:8], af, ch)
 
 	// Step 2: Read ClientRegister
 	msgType, payload, err := protocol.ReadTCPMessage(conn, session)
@@ -325,6 +346,13 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		return
 	}
 
+	// Verify the client's claimed (af, channel) matches this listener.
+	if types.AFName(reg.AfName) != af || types.ChannelName(reg.ChannelName) != ch {
+		vlog.Warnf("[Controller] client %s ClientRegister (af=%s channel=%s) mismatches listener (af=%s channel=%s)",
+			clientID.Hex()[:8], reg.AfName, reg.ChannelName, af, ch)
+		return
+	}
+
 	// Step 3: Update state
 	c.mu.Lock()
 
@@ -333,7 +361,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 	if !exists {
 		ci = &ClientInfo{
 			ClientID:  clientID,
-			Endpoints: make(map[types.AFName]*types.Endpoint),
+			Endpoints: make(map[types.AFName]map[types.ChannelName]*types.Endpoint),
 		}
 		// Look up ClientName from config
 		for _, pc := range c.Config.AllowedClients {
@@ -349,21 +377,47 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 
 	// Check if endpoint IP changed (before overwriting)
 	var ipChanged bool
-	if oldEp, had := ci.Endpoints[af]; had && oldEp.IP != remoteIP {
-		ipChanged = true
-		vlog.Debugf("[Controller] client %s AF=%s IP changed %s -> %s",
-			clientID.Hex()[:8], af, oldEp.IP, remoteIP)
+	if chans, had := ci.Endpoints[af]; had {
+		if oldEp, had2 := chans[ch]; had2 && oldEp.IP != remoteIP {
+			ipChanged = true
+			vlog.Debugf("[Controller] client %s AF=%s channel=%s IP changed %s -> %s",
+				clientID.Hex()[:8], af, ch, oldEp.IP, remoteIP)
+		}
 	}
 
-	// Update endpoint for this AF
-	ep := &types.Endpoint{
-		IP: remoteIP,
+	// Record all (af, channel) endpoints the client advertised.
+	for _, afep := range reg.Endpoints {
+		a := types.AFName(afep.AfName)
+		c2 := types.ChannelName(afep.ChannelName)
+		ep := &types.Endpoint{
+			ProbePort:    uint16(afep.ProbePort),
+			VxlanDstPort: uint16(afep.VxlanDstPort),
+		}
+		// For the (af, ch) slot of THIS connection, overwrite IP with the
+		// observed remote address; for other slots, keep prior IP if known.
+		if a == af && c2 == ch {
+			ep.IP = remoteIP
+		} else if prior, ok := ci.Endpoints[a]; ok {
+			if priorEp, ok2 := prior[c2]; ok2 {
+				ep.IP = priorEp.IP
+			}
+		}
+		if _, ok := ci.Endpoints[a]; !ok {
+			ci.Endpoints[a] = make(map[types.ChannelName]*types.Endpoint)
+		}
+		ci.Endpoints[a][c2] = ep
 	}
-	if afep, ok := reg.AfEndpoints[string(af)]; ok {
-		ep.ProbePort = uint16(afep.ProbePort)
-		ep.VxlanDstPort = uint16(afep.VxlanDstPort)
+
+	// Ensure the current (af, ch) slot is populated even if the register
+	// didn't list it (shouldn't happen, but be defensive).
+	if _, ok := ci.Endpoints[af]; !ok {
+		ci.Endpoints[af] = make(map[types.ChannelName]*types.Endpoint)
 	}
-	ci.Endpoints[af] = ep
+	if _, ok := ci.Endpoints[af][ch]; !ok {
+		ci.Endpoints[af][ch] = &types.Endpoint{IP: remoteIP}
+	} else {
+		ci.Endpoints[af][ch].IP = remoteIP
+	}
 
 	// Find or create ClientConn
 	cc, ccExists := c.clients[clientID]
@@ -385,7 +439,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		}
 		cc = &ClientConn{
 			ClientID:  clientID,
-			AFConns:   make(map[types.AFName]*AFConn),
+			AFConns:   make(map[types.AFName]map[types.ChannelName]*AFConn),
 			SendQueue: make(chan QueueItem, sendQueueSize),
 			Filters:   filters,
 		}
@@ -396,6 +450,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 	// Create AFConn
 	afc := &AFConn{
 		AF:          af,
+		Channel:     ch,
 		TCPConn:     conn,
 		Session:     session,
 		ConnectedAt: time.Now(),
@@ -403,12 +458,13 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		Cleaned:     make(chan struct{}),
 	}
 
-	// Replace previous AF connection if exists:
-	// Close old conn → old goroutine's handleDisconnect does cleanup → then we continue
+	// Replace previous (af, channel) connection if exists.
 	var oldAfc *AFConn
-	if old, ok := cc.AFConns[af]; ok {
-		oldAfc = old
-		old.CloseDone()
+	if chans, ok := cc.AFConns[af]; ok {
+		if old, ok2 := chans[ch]; ok2 {
+			oldAfc = old
+			old.CloseDone()
+		}
 	}
 
 	if oldAfc != nil {
@@ -418,7 +474,10 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		c.mu.Lock()
 	}
 
-	cc.AFConns[af] = afc
+	if _, ok := cc.AFConns[af]; !ok {
+		cc.AFConns[af] = make(map[types.ChannelName]*AFConn)
+	}
+	cc.AFConns[af][ch] = afc
 	c.trySyncClient(cc)
 
 	// Update last client change and trigger debounce
@@ -445,7 +504,6 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 		})
 
 		// If the endpoint IP changed, trigger a new probe+topology cycle
-		// so all clients get updated FDB entries
 		if ipChanged {
 			c.State.LastClientChange = time.Now()
 			c.resetNewClientDebounce()
@@ -469,7 +527,7 @@ func (c *Controller) handleTCPConn(af types.AFName, conn net.Conn) {
 	c.tcpRecvLoop(cc, afc, session)
 
 	// Cleanup on disconnect
-	c.handleDisconnect(cc, af, afc)
+	c.handleDisconnect(cc, af, ch, afc)
 }
 
 func (c *Controller) tcpRecvLoop(cc *ClientConn, afc *AFConn, session *crypto.Session) {
@@ -606,8 +664,6 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 	// Update RouteTable
 	c.updateRouteTable()
 
-	// Push RouteTable update, stamped with the source client's (session_id,
-	// seqid) so the source can confirm round-trip completion via syncCheckLoop.
 	c.pushDelta(&pb.ControllerStateUpdate{
 		Update: &pb.ControllerStateUpdate_RouteTableUpdate{
 			RouteTableUpdate: &pb.RouteTableUpdateProto{
@@ -646,13 +702,18 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		}
 
 		li := &types.LatencyInfo{
-			AFs:    make(map[types.AFName]*types.AFLatency),
-			RawAFs: make(map[types.AFName]*types.AFLatency),
+			AFs:    make(map[types.AFName]map[types.ChannelName]*types.AFLatency),
+			RawAFs: make(map[types.AFName]map[types.ChannelName]*types.AFLatency),
 		}
 
 		// Raw (latest) results
-		for afStr, afResult := range entry.AfResults {
-			li.RawAFs[types.AFName(afStr)] = &types.AFLatency{
+		for _, afResult := range entry.AfResults {
+			af := types.AFName(afResult.AfName)
+			ch := types.ChannelName(afResult.ChannelName)
+			if _, ok := li.RawAFs[af]; !ok {
+				li.RawAFs[af] = make(map[types.ChannelName]*types.AFLatency)
+			}
+			li.RawAFs[af][ch] = &types.AFLatency{
 				Mean:        afResult.LatencyMean,
 				Std:         afResult.LatencyStd,
 				PacketLoss:  afResult.PacketLoss,
@@ -670,8 +731,13 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		if len(debouncedSource) == 0 {
 			debouncedSource = entry.AfResults
 		}
-		for afStr, afResult := range debouncedSource {
-			li.AFs[types.AFName(afStr)] = &types.AFLatency{
+		for _, afResult := range debouncedSource {
+			af := types.AFName(afResult.AfName)
+			ch := types.ChannelName(afResult.ChannelName)
+			if _, ok := li.AFs[af]; !ok {
+				li.AFs[af] = make(map[types.ChannelName]*types.AFLatency)
+			}
+			li.AFs[af][ch] = &types.AFLatency{
 				Mean:        afResult.LatencyMean,
 				Std:         afResult.LatencyStd,
 				PacketLoss:  afResult.PacketLoss,
@@ -690,23 +756,17 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 			li.LastReachable = now
 			c.State.LatencyMatrix[srcID][dstID] = li
 		} else if old := c.State.LatencyMatrix[srcID][dstID]; old != nil {
-			// New result is fully unreachable — only overwrite if old data
-			// has been unreachable for longer than client_offline_timeout
 			if now.Sub(old.LastReachable) > c.Config.ClientOfflineTimeout {
 				li.LastReachable = old.LastReachable
 				c.State.LatencyMatrix[srcID][dstID] = li
 			} else {
-				// Keep old reachable routing data, but update RawAFs so
-				// webui/API reflect the latest unreachable state
 				old.RawAFs = li.RawAFs
 			}
 		} else {
-			// No old data — store the unreachable result
 			c.State.LatencyMatrix[srcID][dstID] = li
 		}
 	}
 
-	// Reset topology update debounce
 	c.resetTopoDebounce()
 
 	c.mu.Unlock()
@@ -812,16 +872,17 @@ func (c *Controller) triggerTopologyUpdate() {
 	// Log best paths and RouteMatrix for debugging
 	for src, dsts := range c.State.BestPaths {
 		for dst, bp := range dsts {
-			vlog.Verbosef("[Controller] BestPath: %s -> %s: cost=%.2f af=%s", src.Hex()[:8], dst.Hex()[:8], bp.Cost, bp.AF)
+			vlog.Verbosef("[Controller] BestPath: %s -> %s: cost=%.2f af=%s channel=%s",
+				src.Hex()[:8], dst.Hex()[:8], bp.Cost, bp.AF, bp.Channel)
 		}
 	}
 	for src, dsts := range newRM {
 		for dst, re := range dsts {
-			vlog.Verbosef("[Controller] RouteMatrix: %s -> %s: nextHop=%s af=%s", src.Hex()[:8], dst.Hex()[:8], re.NextHop.Hex()[:8], re.AF)
+			vlog.Verbosef("[Controller] RouteMatrix: %s -> %s: nextHop=%s af=%s channel=%s",
+				src.Hex()[:8], dst.Hex()[:8], re.NextHop.Hex()[:8], re.AF, re.Channel)
 		}
 	}
 
-	// Push full RouteMatrix update
 	c.pushDelta(&pb.ControllerStateUpdate{
 		Update: &pb.ControllerStateUpdate_RouteMatrixUpdate{
 			RouteMatrixUpdate: &pb.RouteMatrixUpdateProto{
@@ -854,20 +915,27 @@ func (c *Controller) clientSendLoop(cc *ClientConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
 
-		// Pick activeAF if nil
+		// Pick active (af, channel) if nil
 		if cc.ActiveAF == "" {
-			cc.ActiveAF = c.pickActiveAF(cc)
+			cc.ActiveAF, cc.ActiveChannel = c.pickActiveAFChannel(cc)
 		}
 		if cc.ActiveAF == "" {
 			c.mu.Unlock()
-			continue // no AF available, discard
+			continue // nothing available
 		}
 
-		afc := cc.AFConns[cc.ActiveAF]
+		chans, ok := cc.AFConns[cc.ActiveAF]
+		if !ok {
+			c.mu.Unlock()
+			continue
+		}
+		afc := chans[cc.ActiveChannel]
+		if afc == nil {
+			c.mu.Unlock()
+			continue
+		}
 
-		// If not synced, overwrite State with full state (filtered for this client)
-		// and mark Synced immediately so subsequent pushDelta calls will queue
-		// deltas behind this full state rather than skipping this client.
+		// If not synced, overwrite State with full state
 		if !cc.Synced {
 			item.State = c.getFullStateEncodedForClient(cc)
 			cc.Synced = true
@@ -906,20 +974,34 @@ func (c *Controller) clientSendLoop(cc *ClientConn) {
 	}
 }
 
-// pickActiveAF selects the AF with the earliest connection time.
+// pickActiveAFChannel selects the (af, channel) with the earliest connection time.
 // Must be called with c.mu held.
-func (c *Controller) pickActiveAF(cc *ClientConn) types.AFName {
-	var earliest types.AFName
+func (c *Controller) pickActiveAFChannel(cc *ClientConn) (types.AFName, types.ChannelName) {
+	var earliestAF types.AFName
+	var earliestCh types.ChannelName
 	var earliestTime time.Time
 	first := true
-	for af, afc := range cc.AFConns {
-		if first || afc.ConnectedAt.Before(earliestTime) {
-			earliest = af
-			earliestTime = afc.ConnectedAt
-			first = false
+	for af, chans := range cc.AFConns {
+		for ch, afc := range chans {
+			if first || afc.ConnectedAt.Before(earliestTime) {
+				earliestAF = af
+				earliestCh = ch
+				earliestTime = afc.ConnectedAt
+				first = false
+			}
 		}
 	}
-	return earliest
+	return earliestAF, earliestCh
+}
+
+// clientConnCount returns the total number of active (af, channel) conns.
+// Must be called with c.mu held.
+func clientConnCount(cc *ClientConn) int {
+	n := 0
+	for _, chans := range cc.AFConns {
+		n += len(chans)
+	}
+	return n
 }
 
 func (c *Controller) offlineChecker() {
@@ -945,8 +1027,7 @@ func (c *Controller) checkOfflineClients() {
 
 	for id, ci := range c.State.Clients {
 		if now.Sub(ci.LastSeen) > c.Config.ClientOfflineTimeout {
-			// Don't remove if client has active TCP connections
-			if cc, ok := c.clients[id]; ok && len(cc.AFConns) > 0 {
+			if cc, ok := c.clients[id]; ok && clientConnCount(cc) > 0 {
 				ci.LastSeen = now // refresh
 				continue
 			}
@@ -965,9 +1046,11 @@ func (c *Controller) checkOfflineClients() {
 		// Close connection
 		if cc, ok := c.clients[id]; ok {
 			close(cc.SendQueue)
-			for _, afc := range cc.AFConns {
-				afc.CloseDone()
-				afc.TCPConn.Close()
+			for _, chans := range cc.AFConns {
+				for _, afc := range chans {
+					afc.CloseDone()
+					afc.TCPConn.Close()
+				}
 			}
 			cc.Filters.Close()
 			delete(c.clients, id)
@@ -1008,31 +1091,37 @@ func (c *Controller) checkOfflineClients() {
 	}
 }
 
-func (c *Controller) handleDisconnect(cc *ClientConn, af types.AFName, afc *AFConn) {
-	defer close(afc.Cleaned) // always signal completion
+func (c *Controller) handleDisconnect(cc *ClientConn, af types.AFName, ch types.ChannelName, afc *AFConn) {
+	defer close(afc.Cleaned)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Only cleanup if it's still our connection (not already replaced)
-	if current, ok := cc.AFConns[af]; !ok || current != afc {
+	chans, ok := cc.AFConns[af]
+	if !ok {
 		return
 	}
-	delete(cc.AFConns, af)
-
-	if af == cc.ActiveAF {
-		cc.ActiveAF = ""
-		cc.Synced = false
-		// No drain — sendloop will overwrite State with full on next dequeue.
-		// Message items in queue survive (probe requests etc).
+	current, ok2 := chans[ch]
+	if !ok2 || current != afc {
+		return
 	}
-	// Non-activeAF disconnect: just cleared the handle, nothing else.
+	delete(chans, ch)
+	if len(chans) == 0 {
+		delete(cc.AFConns, af)
+	}
+
+	if af == cc.ActiveAF && ch == cc.ActiveChannel {
+		cc.ActiveAF = ""
+		cc.ActiveChannel = ""
+		cc.Synced = false
+	}
 }
 
 // trySyncClient enqueues a trigger item so sendloop wakes up and sends full state.
 // Must be called with c.mu held.
 func (c *Controller) trySyncClient(cc *ClientConn) {
-	if len(cc.AFConns) > 0 && !cc.Synced {
+	if clientConnCount(cc) > 0 && !cc.Synced {
 		select {
 		case cc.SendQueue <- QueueItem{}:
 		default:
@@ -1041,7 +1130,6 @@ func (c *Controller) trySyncClient(cc *ClientConn) {
 }
 
 func (c *Controller) updateRouteTable() {
-	// Rebuild route table from all clients' routes
 	type rtKey struct {
 		mac string
 		ip  netip.Addr
@@ -1051,8 +1139,6 @@ func (c *Controller) updateRouteTable() {
 
 	for clientID, ci := range c.State.Clients {
 		for _, route := range ci.Routes {
-			// Normalize IP: treat invalid Addr (Addr{}) and 0.0.0.0 as the same
-			// to avoid duplicate entries from different zero representations.
 			ip := route.IP
 			if ip.IsValid() && ip.IsUnspecified() {
 				ip = netip.Addr{}
@@ -1092,7 +1178,7 @@ func (c *Controller) udpReadLoop(al *AFListener) {
 			case <-c.ctx.Done():
 				return
 			default:
-				vlog.Errorf("[Controller] UDP read error on %s: %v", al.AF, err)
+				vlog.Errorf("[Controller] UDP read error on %s/%s: %v", al.AF, al.Channel, err)
 				continue
 			}
 		}
@@ -1108,15 +1194,18 @@ func (c *Controller) udpReadLoop(al *AFListener) {
 
 		msgType, payload, peerID, err := protocol.ReadUDPPacket(data, al.UDPSessions.FindByIndex)
 		if err != nil {
-			vlog.Warnf("[Controller] UDP ReadUDPPacket error on %s from %s: %v (len=%d, first_byte=0x%02x)", al.AF, remoteAddr, err, n, data[0])
+			vlog.Warnf("[Controller] UDP ReadUDPPacket error on %s/%s from %s: %v (len=%d, first_byte=0x%02x)",
+				al.AF, al.Channel, remoteAddr, err, n, data[0])
 			continue
 		}
 
 		if msgType == protocol.MsgMulticastForward {
-			vlog.Debugf("[Controller] received MsgMulticastForward on %s from %s (%d bytes payload)", al.AF, remoteAddr, len(payload))
+			vlog.Debugf("[Controller] received MsgMulticastForward on %s/%s from %s (%d bytes payload)",
+				al.AF, al.Channel, remoteAddr, len(payload))
 			c.handleMulticastForward(al, peerID, payload, remoteAddr)
 		} else {
-			vlog.Verbosef("[Controller] UDP msg type=0x%02x on %s from %s", byte(msgType), al.AF, remoteAddr)
+			vlog.Verbosef("[Controller] UDP msg type=0x%02x on %s/%s from %s",
+				byte(msgType), al.AF, al.Channel, remoteAddr)
 		}
 	}
 }
@@ -1130,13 +1219,14 @@ func (c *Controller) handleUDPHandshake(al *AFListener, data []byte, remoteAddr 
 	session.IsUDP = true
 	al.UDPSessions.AddSession(session)
 
-	// Store client's UDP address for sending MulticastDeliver
+	// Store client's UDP address
 	if udpAddr, ok := remoteAddr.(*net.UDPAddr); ok {
-		key := udpAddrKey{ClientID: types.ClientID(session.PeerID), AF: al.AF}
+		key := udpAddrKey{ClientID: types.ClientID(session.PeerID), AF: al.AF, Channel: al.Channel}
 		c.mu.Lock()
 		c.udpAddrs[key] = udpAddr
 		c.mu.Unlock()
-		vlog.Debugf("[Controller] UDP handshake from client %s at %s (AF=%s)", types.ClientID(session.PeerID).Hex()[:8], udpAddr, al.AF)
+		vlog.Debugf("[Controller] UDP handshake from client %s at %s (AF=%s channel=%s)",
+			types.ClientID(session.PeerID).Hex()[:8], udpAddr, al.AF, al.Channel)
 	}
 
 	al.UDPConn.WriteTo(respMsg, remoteAddr)
@@ -1171,38 +1261,41 @@ func (c *Controller) handleMulticastForward(al *AFListener, sourceClientID [32]b
 
 	deliveredTo := 0
 
-	// Send on ALL AF listeners, not just the one that received the forward
-	for _, listener := range c.afListeners {
-		for clientID, cc := range c.clients {
-			if clientID == srcID {
-				continue // skip source
-			}
-			if !cc.Synced {
-				continue
-			}
-
-			// Output filter: check destination client's filter
-			if cc.Filters != nil {
-				if accepted, _, _ := cc.Filters.OutputMcast.FilterMcast(fwd.Payload); !accepted {
+	// Send on ALL listeners
+	for _, chans := range c.afListeners {
+		for _, listener := range chans {
+			for clientID, cc := range c.clients {
+				if clientID == srcID {
 					continue
 				}
-			}
+				if !cc.Synced {
+					continue
+				}
 
-			session := listener.UDPSessions.FindByPeer(clientID)
-			if session == nil {
-				continue
-			}
+				// Output filter: check destination client's filter
+				if cc.Filters != nil {
+					if accepted, _, _ := cc.Filters.OutputMcast.FilterMcast(fwd.Payload); !accepted {
+						continue
+					}
+				}
 
-			key := udpAddrKey{ClientID: clientID, AF: listener.AF}
-			addr, ok := c.udpAddrs[key]
-			if !ok {
-				continue
-			}
+				session := listener.UDPSessions.FindByPeer(clientID)
+				if session == nil {
+					continue
+				}
 
-			if err := protocol.WriteUDPPacket(listener.UDPConn, addr, session, protocol.MsgMulticastDeliver, deliverData); err != nil {
-				vlog.Errorf("[Controller] multicast deliver to %s via %s error: %v", clientID.Hex()[:8], listener.AF, err)
-			} else {
-				deliveredTo++
+				key := udpAddrKey{ClientID: clientID, AF: listener.AF, Channel: listener.Channel}
+				addr, ok := c.udpAddrs[key]
+				if !ok {
+					continue
+				}
+
+				if err := protocol.WriteUDPPacket(listener.UDPConn, addr, session, protocol.MsgMulticastDeliver, deliverData); err != nil {
+					vlog.Errorf("[Controller] multicast deliver to %s via %s/%s error: %v",
+						clientID.Hex()[:8], listener.AF, listener.Channel, err)
+				} else {
+					deliveredTo++
+				}
 			}
 		}
 	}
@@ -1242,21 +1335,27 @@ func macEqual(a, b net.HardwareAddr) bool {
 	return true
 }
 
-// endpointOverrides returns per-AF endpoint overrides for a given client.
-func (c *Controller) endpointOverrides(clientID types.ClientID) map[types.AFName]string {
+// endpointOverrides returns per-(af, channel) endpoint overrides for a given client.
+func (c *Controller) endpointOverrides(clientID types.ClientID) map[OverrideKey]string {
 	for _, pc := range c.Config.AllowedClients {
-		if pc.ClientID == clientID {
-			if len(pc.AFSettings) == 0 {
-				return nil
-			}
-			m := make(map[types.AFName]string, len(pc.AFSettings))
-			for af, afCfg := range pc.AFSettings {
-				if afCfg.EndpointOverride != "" {
-					m[af] = afCfg.EndpointOverride
+		if pc.ClientID != clientID {
+			continue
+		}
+		if len(pc.AFSettings) == 0 {
+			return nil
+		}
+		m := make(map[OverrideKey]string)
+		for af, chans := range pc.AFSettings {
+			for ch, cfg := range chans {
+				if cfg != nil && cfg.EndpointOverride != "" {
+					m[OverrideKey{AF: af, Channel: ch}] = cfg.EndpointOverride
 				}
 			}
-			return m
 		}
+		if len(m) == 0 {
+			return nil
+		}
+		return m
 	}
 	return nil
 }
@@ -1279,27 +1378,33 @@ func (c *Controller) computeCurrentBestPaths() map[types.ClientID]map[types.Clie
 }
 
 // resolveStaticCosts converts name-indexed static costs to ClientID-indexed.
-func (c *Controller) resolveStaticCosts(nameCosts map[string]map[string]map[types.AFName]float64) map[types.ClientID]map[types.ClientID]map[types.AFName]float64 {
+func (c *Controller) resolveStaticCosts(
+	nameCosts map[string]map[string]map[types.AFName]map[types.ChannelName]float64,
+) map[types.ClientID]map[types.ClientID]map[types.AFName]map[types.ChannelName]float64 {
 	nameToID := make(map[string]types.ClientID)
 	for _, pc := range c.Config.AllowedClients {
 		nameToID[pc.ClientName] = pc.ClientID
 	}
 
-	result := make(map[types.ClientID]map[types.ClientID]map[types.AFName]float64)
+	result := make(map[types.ClientID]map[types.ClientID]map[types.AFName]map[types.ChannelName]float64)
 	for srcName, dsts := range nameCosts {
 		srcID, ok := nameToID[srcName]
 		if !ok {
 			continue
 		}
-		result[srcID] = make(map[types.ClientID]map[types.AFName]float64)
+		result[srcID] = make(map[types.ClientID]map[types.AFName]map[types.ChannelName]float64)
 		for dstName, afs := range dsts {
 			dstID, ok := nameToID[dstName]
 			if !ok {
 				continue
 			}
-			result[srcID][dstID] = make(map[types.AFName]float64)
-			for af, cost := range afs {
-				result[srcID][dstID][af] = cost
+			result[srcID][dstID] = make(map[types.AFName]map[types.ChannelName]float64)
+			for af, chans := range afs {
+				inner := make(map[types.ChannelName]float64, len(chans))
+				for ch, cost := range chans {
+					inner[ch] = cost
+				}
+				result[srcID][dstID][af] = inner
 			}
 		}
 	}

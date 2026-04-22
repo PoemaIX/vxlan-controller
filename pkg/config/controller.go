@@ -16,7 +16,7 @@ import (
 // ControllerConfig is the parsed controller configuration.
 type ControllerConfig struct {
 	PrivateKey                [32]byte
-	AFSettings                map[types.AFName]*ControllerAFConfig
+	AFSettings                map[types.AFName]map[types.ChannelName]*ControllerChannelConfig
 	ClientOfflineTimeout      time.Duration
 	SyncNewClientDebounce     time.Duration
 	SyncNewClientDebounceMax  time.Duration
@@ -27,9 +27,10 @@ type ControllerConfig struct {
 	LogLevel                  string
 	WebUI                     *WebUIConfig
 	CostMode                  string // "probe" or "static"
-	StaticCosts               map[string]map[string]map[types.AFName]float64 // [src_name][dst_name][af]cost
-	APISocket                 string
-	ConfigPath                string // path to config file (for write-back)
+	// StaticCosts: [src_name][dst_name][af][channel] -> cost
+	StaticCosts map[string]map[string]map[types.AFName]map[types.ChannelName]float64
+	APISocket   string
+	ConfigPath  string // path to config file (for write-back)
 }
 
 type WebUIConfig struct {
@@ -45,8 +46,10 @@ type WebUINode struct {
 	Pos   [2]float64 `yaml:"pos"`
 }
 
-type ControllerAFConfig struct {
-	Name              types.AFName
+// ControllerChannelConfig is the per-(AF, channel) configuration on a controller.
+type ControllerChannelConfig struct {
+	AF                types.AFName
+	Channel           types.ChannelName
 	Enable            bool
 	BindAddr          netip.Addr
 	AutoIPInterface   string
@@ -148,18 +151,31 @@ func LoadControllerConfig(path string) (*ControllerConfig, []DefaultApplied, err
 		return nil, nil, err
 	}
 
-	// AF settings
+	// AF settings: outer = AF, inner = channel.
 	if afNode, ok := m["address_families"]; ok {
-		cfg.AFSettings = make(map[types.AFName]*ControllerAFConfig)
+		cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ControllerChannelConfig)
 		afMap := nodeMap(afNode)
-		for name, afValueNode := range afMap {
-			afDt := dt.sub("address_families." + name)
-			af, err := overlayControllerAF(name, afValueNode, afDt)
-			if err != nil {
-				return nil, nil, fmt.Errorf("af %s: %w", name, err)
+		for afNameStr, chanNode := range afMap {
+			afName := types.AFName(afNameStr)
+			chanMap := nodeMap(chanNode)
+			if chanMap == nil {
+				return nil, nil, fmt.Errorf("af %s: expected channel mapping", afNameStr)
 			}
-			cfg.AFSettings[types.AFName(name)] = af
+			cfg.AFSettings[afName] = make(map[types.ChannelName]*ControllerChannelConfig)
+			for chNameStr, chValueNode := range chanMap {
+				chName := types.ChannelName(chNameStr)
+				chDt := dt.sub("address_families." + afNameStr + "." + chNameStr)
+				ch, err := overlayControllerChannel(afName, chName, chValueNode, chDt)
+				if err != nil {
+					return nil, nil, fmt.Errorf("af %s channel %s: %w", afNameStr, chNameStr, err)
+				}
+				cfg.AFSettings[afName][chName] = ch
+			}
 		}
+	}
+
+	if err := validateControllerUniqueness(cfg.AFSettings); err != nil {
+		return nil, nil, err
 	}
 
 	// Allowed clients (not tracked — required field)
@@ -173,9 +189,9 @@ func LoadControllerConfig(path string) (*ControllerConfig, []DefaultApplied, err
 		}
 	}
 
-	// Static costs
+	// Static costs: [src][dst][af][channel] -> cost
 	if costsNode, ok := m["static_costs"]; ok {
-		var rawCosts map[string]map[string]map[string]float64
+		var rawCosts map[string]map[string]map[string]map[string]float64
 		if err := costsNode.Decode(&rawCosts); err != nil {
 			return nil, nil, fmt.Errorf("static_costs: %w", err)
 		}
@@ -185,19 +201,23 @@ func LoadControllerConfig(path string) (*ControllerConfig, []DefaultApplied, err
 			nameSet[pc.ClientName] = true
 		}
 
-		cfg.StaticCosts = make(map[string]map[string]map[types.AFName]float64)
+		cfg.StaticCosts = make(map[string]map[string]map[types.AFName]map[types.ChannelName]float64)
 		for src, dsts := range rawCosts {
 			if !nameSet[src] {
 				return nil, nil, fmt.Errorf("static_costs: unknown client name %q", src)
 			}
-			cfg.StaticCosts[src] = make(map[string]map[types.AFName]float64)
+			cfg.StaticCosts[src] = make(map[string]map[types.AFName]map[types.ChannelName]float64)
 			for dst, afs := range dsts {
 				if !nameSet[dst] {
 					return nil, nil, fmt.Errorf("static_costs: unknown client name %q", dst)
 				}
-				cfg.StaticCosts[src][dst] = make(map[types.AFName]float64)
-				for af, cost := range afs {
-					cfg.StaticCosts[src][dst][types.AFName(af)] = cost
+				cfg.StaticCosts[src][dst] = make(map[types.AFName]map[types.ChannelName]float64)
+				for af, chans := range afs {
+					inner := make(map[types.ChannelName]float64, len(chans))
+					for ch, cost := range chans {
+						inner[types.ChannelName(ch)] = cost
+					}
+					cfg.StaticCosts[src][dst][types.AFName(af)] = inner
 				}
 			}
 		}
@@ -217,24 +237,30 @@ func LoadControllerConfig(path string) (*ControllerConfig, []DefaultApplied, err
 	return cfg, dt.result(), nil
 }
 
-func overlayControllerAF(name string, node *yaml.Node, dt *defaultTracker) (*ControllerAFConfig, error) {
-	afName := types.AFName(name)
-
-	var base *ControllerAFConfig
-	if def, ok := DefaultControllerConfig.AFSettings[afName]; ok {
-		clone := *def
-		base = &clone
-	} else {
-		for _, def := range DefaultControllerConfig.AFSettings {
+func pickControllerChannelDefault(af types.AFName, ch types.ChannelName) *ControllerChannelConfig {
+	if chans, ok := DefaultControllerConfig.AFSettings[af]; ok {
+		if def, ok := chans[ch]; ok {
 			clone := *def
-			base = &clone
-			break
+			return &clone
+		}
+		for _, def := range chans {
+			clone := *def
+			return &clone
 		}
 	}
-	if base == nil {
-		base = &ControllerAFConfig{}
+	for _, chans := range DefaultControllerConfig.AFSettings {
+		for _, def := range chans {
+			clone := *def
+			return &clone
+		}
 	}
-	base.Name = afName
+	return &ControllerChannelConfig{}
+}
+
+func overlayControllerChannel(afName types.AFName, chName types.ChannelName, node *yaml.Node, dt *defaultTracker) (*ControllerChannelConfig, error) {
+	base := pickControllerChannelDefault(afName, chName)
+	base.AF = afName
+	base.Channel = chName
 
 	m := nodeMap(node)
 
@@ -276,7 +302,7 @@ func overlayControllerAF(name string, node *yaml.Node, dt *defaultTracker) (*Con
 	} else if hasAutoIP {
 		base.AutoIPInterface = autoIP
 		addrSelectStr, _ := nodeString(m, "addr_select")
-		script, err := resolveAddrSelect(addrSelectStr, name)
+		script, err := resolveAddrSelect(addrSelectStr, string(afName))
 		if err != nil {
 			return nil, err
 		}
@@ -289,6 +315,33 @@ func overlayControllerAF(name string, node *yaml.Node, dt *defaultTracker) (*Con
 	}
 
 	return base, nil
+}
+
+// validateControllerUniqueness enforces: within an AF, bind_addr/autoip_interface
+// unique across channels.
+func validateControllerUniqueness(afs map[types.AFName]map[types.ChannelName]*ControllerChannelConfig) error {
+	for af, chans := range afs {
+		bindSeen := make(map[string]types.ChannelName)
+		autoSeen := make(map[string]types.ChannelName)
+		for ch, cc := range chans {
+			if cc.BindAddr.IsValid() {
+				key := cc.BindAddr.String()
+				if prev, ok := bindSeen[key]; ok {
+					return fmt.Errorf("af %s: bind_addr %s duplicated in channels %s and %s",
+						af, key, prev, ch)
+				}
+				bindSeen[key] = ch
+			}
+			if cc.AutoIPInterface != "" {
+				if prev, ok := autoSeen[cc.AutoIPInterface]; ok {
+					return fmt.Errorf("af %s: autoip_interface %s duplicated in channels %s and %s",
+						af, cc.AutoIPInterface, prev, ch)
+				}
+				autoSeen[cc.AutoIPInterface] = ch
+			}
+		}
+	}
+	return nil
 }
 
 func decodePerClient(node *yaml.Node, configDir string) (types.PerClientConfig, error) {
@@ -308,16 +361,20 @@ func decodePerClient(node *yaml.Node, configDir string) (types.PerClientConfig, 
 		pc.Filters = filter.ParseFilterNode(n, configDir)
 	}
 
-	// Per-AF settings
+	// Per-(af, channel) settings
 	if afNode, ok := m["af_settings"]; ok {
-		var raw map[string]*types.PerClientAFConfig
+		var raw map[string]map[string]*types.PerClientChannelConfig
 		if err := afNode.Decode(&raw); err != nil {
 			return pc, fmt.Errorf("client %s: af_settings: %w", pc.ClientName, err)
 		}
 		if len(raw) > 0 {
-			pc.AFSettings = make(map[types.AFName]*types.PerClientAFConfig, len(raw))
-			for afStr, afCfg := range raw {
-				pc.AFSettings[types.AFName(afStr)] = afCfg
+			pc.AFSettings = make(map[types.AFName]map[types.ChannelName]*types.PerClientChannelConfig, len(raw))
+			for afStr, chans := range raw {
+				inner := make(map[types.ChannelName]*types.PerClientChannelConfig, len(chans))
+				for chStr, cfg := range chans {
+					inner[types.ChannelName(chStr)] = cfg
+				}
+				pc.AFSettings[types.AFName(afStr)] = inner
 			}
 		}
 	}
@@ -328,10 +385,14 @@ func decodePerClient(node *yaml.Node, configDir string) (types.PerClientConfig, 
 func cloneControllerConfig(src *ControllerConfig) *ControllerConfig {
 	dst := *src
 	if src.AFSettings != nil {
-		dst.AFSettings = make(map[types.AFName]*ControllerAFConfig, len(src.AFSettings))
-		for k, v := range src.AFSettings {
-			clone := *v
-			dst.AFSettings[k] = &clone
+		dst.AFSettings = make(map[types.AFName]map[types.ChannelName]*ControllerChannelConfig, len(src.AFSettings))
+		for af, chans := range src.AFSettings {
+			inner := make(map[types.ChannelName]*ControllerChannelConfig, len(chans))
+			for ch, v := range chans {
+				clone := *v
+				inner[ch] = &clone
+			}
+			dst.AFSettings[af] = inner
 		}
 	}
 	if src.AllowedClients != nil {

@@ -259,21 +259,23 @@ probing:
   probe_timeout_ms: 1000
 address_families:
   v4:
-    enable: true
-    bind_addr: "${V4_SUBNET}.${node}"
-    communication_port: ${COMM_PORT}
-    vxlan_vni: ${VNI}
-    vxlan_dst_port: ${VXLAN_DSTPORT}
-    vxlan_src_port_start: ${VXLAN_DSTPORT}
-    vxlan_src_port_end: ${VXLAN_DSTPORT}
+    ISP1:
+      enable: true
+      bind_addr: "${V4_SUBNET}.${node}"
+      communication_port: ${COMM_PORT}
+      vxlan_vni: ${VNI}
+      vxlan_dst_port: ${VXLAN_DSTPORT}
+      vxlan_src_port_start: ${VXLAN_DSTPORT}
+      vxlan_src_port_end: ${VXLAN_DSTPORT}
   v6:
-    enable: true
-    bind_addr: "${V6_PREFIX}${node}"
-    communication_port: $((COMM_PORT + 1))
-    vxlan_vni: ${VNI}
-    vxlan_dst_port: ${VXLAN_DSTPORT}
-    vxlan_src_port_start: ${VXLAN_DSTPORT}
-    vxlan_src_port_end: ${VXLAN_DSTPORT}
+    ISP1:
+      enable: true
+      bind_addr: "${V6_PREFIX}${node}"
+      communication_port: $((COMM_PORT + 1))
+      vxlan_vni: ${VNI}
+      vxlan_dst_port: ${VXLAN_DSTPORT}
+      vxlan_src_port_start: ${VXLAN_DSTPORT}
+      vxlan_src_port_end: ${VXLAN_DSTPORT}
 allowed_clients:
   - client_id: "${PUB_1}"
     client_name: "node-1"
@@ -320,38 +322,40 @@ YAML
         if $auto_detect; then
             cat >> "$f" << YAML
   v4:
-    enable: true
-    autoip_interface: "eth-v4"
-    probe_port: ${PROBE_PORT}
-    communication_port: ${COMM_PORT}
-    vxlan_name: "vxlan-v4"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${VXLAN_MTU}
-    vxlan_dst_port: ${VXLAN_DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_4}"
-        addr: "${V4_SUBNET}.4:${COMM_PORT}"
-      - pubkey: "${PUB_10}"
-        addr: "${V4_SUBNET}.10:${COMM_PORT}"
+    ISP1:
+      enable: true
+      autoip_interface: "eth-v4"
+      probe_port: ${PROBE_PORT}
+      communication_port: ${COMM_PORT}
+      vxlan_name: "vxlan-v4-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${VXLAN_MTU}
+      vxlan_dst_port: ${VXLAN_DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_4}"
+          addr: "${V4_SUBNET}.4:${COMM_PORT}"
+        - pubkey: "${PUB_10}"
+          addr: "${V4_SUBNET}.10:${COMM_PORT}"
 YAML
         else
             cat >> "$f" << YAML
   v4:
-    enable: true
-    bind_addr: "${V4_SUBNET}.${node}"
-    probe_port: ${PROBE_PORT}
-    communication_port: ${COMM_PORT}
-    vxlan_name: "vxlan-v4"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${VXLAN_MTU}
-    vxlan_dst_port: ${VXLAN_DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_4}"
-        addr: "${V4_SUBNET}.4:${COMM_PORT}"
-      - pubkey: "${PUB_10}"
-        addr: "${V4_SUBNET}.10:${COMM_PORT}"
+    ISP1:
+      enable: true
+      bind_addr: "${V4_SUBNET}.${node}"
+      probe_port: ${PROBE_PORT}
+      communication_port: ${COMM_PORT}
+      vxlan_name: "vxlan-v4-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${VXLAN_MTU}
+      vxlan_dst_port: ${VXLAN_DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_4}"
+          addr: "${V4_SUBNET}.4:${COMM_PORT}"
+        - pubkey: "${PUB_10}"
+          addr: "${V4_SUBNET}.10:${COMM_PORT}"
 YAML
         fi
     fi
@@ -360,38 +364,40 @@ YAML
         if $auto_detect; then
             cat >> "$f" << YAML
   v6:
-    enable: true
-    autoip_interface: "eth-v6"
-    probe_port: $((PROBE_PORT + 1))
-    communication_port: $((COMM_PORT + 1))
-    vxlan_name: "vxlan-v6"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${VXLAN_MTU}
-    vxlan_dst_port: ${VXLAN_DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_4}"
-        addr: "[${V6_PREFIX}4]:$((COMM_PORT + 1))"
-      - pubkey: "${PUB_10}"
-        addr: "[${V6_PREFIX}10]:$((COMM_PORT + 1))"
+    ISP1:
+      enable: true
+      autoip_interface: "eth-v6"
+      probe_port: $((PROBE_PORT + 1))
+      communication_port: $((COMM_PORT + 1))
+      vxlan_name: "vxlan-v6-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${VXLAN_MTU}
+      vxlan_dst_port: ${VXLAN_DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_4}"
+          addr: "[${V6_PREFIX}4]:$((COMM_PORT + 1))"
+        - pubkey: "${PUB_10}"
+          addr: "[${V6_PREFIX}10]:$((COMM_PORT + 1))"
 YAML
         else
             cat >> "$f" << YAML
   v6:
-    enable: true
-    bind_addr: "${V6_PREFIX}${node}"
-    probe_port: $((PROBE_PORT + 1))
-    communication_port: $((COMM_PORT + 1))
-    vxlan_name: "vxlan-v6"
-    vxlan_vni: ${VNI}
-    vxlan_mtu: ${VXLAN_MTU}
-    vxlan_dst_port: ${VXLAN_DSTPORT}
-    priority: 10
-    controllers:
-      - pubkey: "${PUB_4}"
-        addr: "[${V6_PREFIX}4]:$((COMM_PORT + 1))"
-      - pubkey: "${PUB_10}"
-        addr: "[${V6_PREFIX}10]:$((COMM_PORT + 1))"
+    ISP1:
+      enable: true
+      bind_addr: "${V6_PREFIX}${node}"
+      probe_port: $((PROBE_PORT + 1))
+      communication_port: $((COMM_PORT + 1))
+      vxlan_name: "vxlan-v6-ISP1"
+      vxlan_vni: ${VNI}
+      vxlan_mtu: ${VXLAN_MTU}
+      vxlan_dst_port: ${VXLAN_DSTPORT}
+      priority: 10
+      controllers:
+        - pubkey: "${PUB_4}"
+          addr: "[${V6_PREFIX}4]:$((COMM_PORT + 1))"
+        - pubkey: "${PUB_10}"
+          addr: "[${V6_PREFIX}10]:$((COMM_PORT + 1))"
 YAML
         fi
     fi

@@ -67,15 +67,17 @@ func (c *Client) reconcileFDB() {
 
 	// Log all client endpoints for debugging
 	for cid, ci := range view.Clients {
-		for af, ep := range ci.Endpoints {
-			vlog.Verbosef("[Client] FDB debug: client %s(%s) af=%s endpoint=%s", nameOf(cid), cid.Hex()[:8], af, ep.IP)
+		for af, chans := range ci.Endpoints {
+			for ch, ep := range chans {
+				vlog.Verbosef("[Client] FDB debug: client %s(%s) af=%s channel=%s endpoint=%s", nameOf(cid), cid.Hex()[:8], af, ch, ep.IP)
+			}
 		}
 	}
 
 	// Log my routes for debugging
 	if myRoutes, ok := view.RouteMatrix[c.ClientID]; ok {
 		for dst, re := range myRoutes {
-			vlog.Verbosef("[Client] FDB route: me -> %s nextHop=%s af=%s", nameOf(dst), nameOf(re.NextHop), re.AF)
+			vlog.Verbosef("[Client] FDB route: me -> %s nextHop=%s af=%s channel=%s", nameOf(dst), nameOf(re.NextHop), re.AF, re.Channel)
 		}
 	} else {
 		vlog.Verbosef("[Client] FDB route: no routes for my ID %s in RouteMatrix", c.ClientID.Hex()[:8])
@@ -105,22 +107,32 @@ func (c *Client) reconcileFDB() {
 			continue
 		}
 
-		// Find the nexthop's endpoint for the chosen AF
+		// Find the nexthop's endpoint for the chosen (af, channel)
 		nextHopInfo, ok := view.Clients[routeEntry.NextHop]
 		if !ok {
 			vlog.Verbosef("[Client] FDB skip %s: nexthop %s not in Clients", macStr, nameOf(routeEntry.NextHop))
 			continue
 		}
-		ep, ok := nextHopInfo.Endpoints[routeEntry.AF]
+		epChans, ok := nextHopInfo.Endpoints[routeEntry.AF]
 		if !ok {
 			vlog.Verbosef("[Client] FDB skip %s: nexthop %s has no endpoint for AF %s", macStr, nameOf(routeEntry.NextHop), routeEntry.AF)
 			continue
 		}
+		ep, ok := epChans[routeEntry.Channel]
+		if !ok {
+			vlog.Verbosef("[Client] FDB skip %s: nexthop %s has no endpoint for AF=%s channel=%s", macStr, nameOf(routeEntry.NextHop), routeEntry.AF, routeEntry.Channel)
+			continue
+		}
 
-		// Find the vxlan device for this AF
-		vxlanDev, ok := c.VxlanDevs[routeEntry.AF]
+		// Find the vxlan device for this (af, channel)
+		vdChans, ok := c.VxlanDevs[routeEntry.AF]
 		if !ok {
 			vlog.Verbosef("[Client] FDB skip %s: no local vxlan device for AF %s", macStr, routeEntry.AF)
+			continue
+		}
+		vxlanDev, ok := vdChans[routeEntry.Channel]
+		if !ok {
+			vlog.Verbosef("[Client] FDB skip %s: no local vxlan device for AF=%s channel=%s", macStr, routeEntry.AF, routeEntry.Channel)
 			continue
 		}
 
@@ -161,12 +173,20 @@ func (c *Client) reconcileFDB() {
 		if !ok {
 			continue
 		}
-		ep, ok := nextHopInfo.Endpoints[routeEntry.AF]
+		epChans, ok := nextHopInfo.Endpoints[routeEntry.AF]
+		if !ok {
+			continue
+		}
+		ep, ok := epChans[routeEntry.Channel]
 		if !ok {
 			continue
 		}
 
-		vxlanDev, ok := c.VxlanDevs[routeEntry.AF]
+		vdChans, ok := c.VxlanDevs[routeEntry.AF]
+		if !ok {
+			continue
+		}
+		vxlanDev, ok := vdChans[routeEntry.Channel]
 		if !ok {
 			continue
 		}

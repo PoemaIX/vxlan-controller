@@ -33,16 +33,24 @@ func runVxccli(sockPath string, args []string) {
 			vxccliAFList(sockPath)
 		case "get":
 			if len(args) < 3 {
-				fmt.Fprintln(os.Stderr, "Usage: vxccli af get <af_name>")
+				fmt.Fprintln(os.Stderr, "Usage: vxccli af get <af_name> [channel]")
 				os.Exit(1)
 			}
-			vxccliAFGet(sockPath, args[2])
+			ch := ""
+			if len(args) >= 4 {
+				ch = args[3]
+			}
+			vxccliAFGet(sockPath, args[2], ch)
 		case "set":
 			if len(args) < 4 {
-				fmt.Fprintln(os.Stderr, "Usage: vxccli af set <af_name> <addr>")
+				fmt.Fprintln(os.Stderr, "Usage: vxccli af set <af_name> [channel] <addr>")
 				os.Exit(1)
 			}
-			vxccliAFSet(sockPath, args[2], args[3])
+			if len(args) >= 5 {
+				vxccliAFSet(sockPath, args[2], args[3], args[4])
+			} else {
+				vxccliAFSet(sockPath, args[2], "", args[3])
+			}
 		default:
 			vxccliUsage()
 			os.Exit(1)
@@ -90,16 +98,21 @@ func vxccliUsage() {
 	fmt.Fprintln(os.Stderr, "  show controller                    Show controller connection states")
 	fmt.Fprintln(os.Stderr, "  show route                         Show route table (from authority)")
 	fmt.Fprintln(os.Stderr, "  show route controller <id>         Show route table from a specific controller")
-	fmt.Fprintln(os.Stderr, "  af list                            List address families and bind addresses")
-	fmt.Fprintln(os.Stderr, "  af get <af>                        Get bind address for an AF")
-	fmt.Fprintln(os.Stderr, "  af set <af> <addr>                 Set bind address (non-autoip only)")
+	fmt.Fprintln(os.Stderr, "  af list                            List (af, channel) and bind addresses")
+	fmt.Fprintln(os.Stderr, "  af get <af> [channel]              Get bind address for an (af, channel)")
+	fmt.Fprintln(os.Stderr, "  af set <af> [channel] <addr>       Set bind address (non-autoip only)")
 	fmt.Fprintln(os.Stderr, "  peer list                          List peers with endpoints and probe results")
 }
 
 type afInfoResult struct {
 	AF       string `json:"af"`
+	Channel  string `json:"channel"`
 	BindAddr string `json:"bind_addr"`
 	AutoIP   string `json:"autoip,omitempty"`
+}
+
+func (r afInfoResult) label() string {
+	return r.AF + "/" + r.Channel
 }
 
 func vxccliAFList(sockPath string) {
@@ -120,17 +133,28 @@ func vxccliAFList(sockPath string) {
 		return
 	}
 
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].AF != result[j].AF {
+			return result[i].AF < result[j].AF
+		}
+		return result[i].Channel < result[j].Channel
+	})
+
 	for _, af := range result {
 		if af.AutoIP != "" {
-			fmt.Printf("%s: %s (autoip: %s)\n", af.AF, af.BindAddr, af.AutoIP)
+			fmt.Printf("%s: %s (autoip: %s)\n", af.label(), af.BindAddr, af.AutoIP)
 		} else {
-			fmt.Printf("%s: %s (static)\n", af.AF, af.BindAddr)
+			fmt.Printf("%s: %s (static)\n", af.label(), af.BindAddr)
 		}
 	}
 }
 
-func vxccliAFGet(sockPath string, afName string) {
-	raw, err := apisock.Call(sockPath, "af.get", map[string]string{"af": afName})
+func vxccliAFGet(sockPath string, afName, channel string) {
+	params := map[string]string{"af": afName}
+	if channel != "" {
+		params["channel"] = channel
+	}
+	raw, err := apisock.Call(sockPath, "af.get", params)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -143,14 +167,18 @@ func vxccliAFGet(sockPath string, afName string) {
 	}
 
 	if result.AutoIP != "" {
-		fmt.Printf("%s: %s (autoip: %s)\n", result.AF, result.BindAddr, result.AutoIP)
+		fmt.Printf("%s: %s (autoip: %s)\n", result.label(), result.BindAddr, result.AutoIP)
 	} else {
-		fmt.Printf("%s: %s (static)\n", result.AF, result.BindAddr)
+		fmt.Printf("%s: %s (static)\n", result.label(), result.BindAddr)
 	}
 }
 
-func vxccliAFSet(sockPath string, afName, addr string) {
-	raw, err := apisock.Call(sockPath, "af.set", map[string]string{"af": afName, "addr": addr})
+func vxccliAFSet(sockPath string, afName, channel, addr string) {
+	params := map[string]string{"af": afName, "addr": addr}
+	if channel != "" {
+		params["channel"] = channel
+	}
+	raw, err := apisock.Call(sockPath, "af.set", params)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -161,7 +189,11 @@ func vxccliAFSet(sockPath string, afName, addr string) {
 		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("%s: %s\n", result["af"], result["bind_addr"])
+	label := result["af"]
+	if ch := result["channel"]; ch != "" {
+		label += "/" + ch
+	}
+	fmt.Printf("%s: %s\n", label, result["bind_addr"])
 }
 
 type peerListResult struct {
@@ -221,24 +253,24 @@ func vxccliPeerList(sockPath string) {
 		}
 		fmt.Printf("%s (%s)  last_seen=%s\n", name, peer.ClientID, peer.LastSeen)
 
-		for _, af := range sortedKeys(peer.Endpoints) {
-			ep := peer.Endpoints[af]
-			fmt.Printf("  %s: %s\n", af, net.JoinHostPort(ep.IP, strconv.Itoa(int(ep.ProbePort))))
+		for _, key := range sortedKeys(peer.Endpoints) {
+			ep := peer.Endpoints[key]
+			fmt.Printf("  %s: %s\n", key, net.JoinHostPort(ep.IP, strconv.Itoa(int(ep.ProbePort))))
 		}
 
 		if peer.Probe != nil {
 			fmt.Printf("  probe_time=%s\n", peer.Probe.Time)
-			for _, af := range sortedKeys(peer.Probe.AFResults) {
-				pr := peer.Probe.AFResults[af]
+			for _, key := range sortedKeys(peer.Probe.AFResults) {
+				pr := peer.Probe.AFResults[key]
 				if pr.PacketLoss >= 1.0 {
-					fmt.Printf("    %s: unreachable\n", af)
+					fmt.Printf("    %s: unreachable\n", key)
 				} else {
 					lossStr := fmt.Sprintf("%.0f%%", pr.PacketLoss*100)
-					fmt.Printf("    %s: mean=%.2fms std=%.2fms loss=%s\n", af, pr.LatencyMean, pr.LatencyStd, lossStr)
+					fmt.Printf("    %s: mean=%.2fms std=%.2fms loss=%s\n", key, pr.LatencyMean, pr.LatencyStd, lossStr)
 				}
-				if db, ok := peer.Probe.DebouncedAFResults[af]; ok && db.PacketLoss < 1.0 {
+				if db, ok := peer.Probe.DebouncedAFResults[key]; ok && db.PacketLoss < 1.0 {
 					dbLossStr := fmt.Sprintf("%.0f%%", db.PacketLoss*100)
-					fmt.Printf("    %s(debounced): mean=%.2fms std=%.2fms loss=%s\n", af, db.LatencyMean, db.LatencyStd, dbLossStr)
+					fmt.Printf("    %s(debounced): mean=%.2fms std=%.2fms loss=%s\n", key, db.LatencyMean, db.LatencyStd, dbLossStr)
 				}
 			}
 		} else {
@@ -248,14 +280,15 @@ func vxccliPeerList(sockPath string) {
 }
 
 type showControllerEntry struct {
-	ControllerID string                          `json:"controller_id"`
-	State        string                          `json:"state"`
-	IsAuthority  bool                            `json:"is_authority"`
-	ActiveAF     string                          `json:"active_af"`
-	Synced       bool                            `json:"synced"`
-	MACsSynced   bool                            `json:"macs_synced"`
-	ClientCount  int                             `json:"client_count"`
-	Endpoints    map[string]*showCtrlEndpointCLI `json:"endpoints"`
+	ControllerID  string                          `json:"controller_id"`
+	State         string                          `json:"state"`
+	IsAuthority   bool                            `json:"is_authority"`
+	ActiveAF      string                          `json:"active_af"`
+	ActiveChannel string                          `json:"active_channel"`
+	Synced        bool                            `json:"synced"`
+	MACsSynced    bool                            `json:"macs_synced"`
+	ClientCount   int                             `json:"client_count"`
+	Endpoints     map[string]*showCtrlEndpointCLI `json:"endpoints"`
 }
 
 type showCtrlEndpointCLI struct {
@@ -298,15 +331,19 @@ func vxccliShowController(sockPath string) {
 		if !c.MACsSynced {
 			macStr = " (MACs not synced)"
 		}
-		fmt.Printf("%-16s  %-12s af=%s clients=%d%s%s%s\n",
-			c.ControllerID, c.State, c.ActiveAF, c.ClientCount, authStr, syncStr, macStr)
-		for _, af := range sortedKeys(c.Endpoints) {
-			ep := c.Endpoints[af]
+		activeLabel := c.ActiveAF
+		if c.ActiveChannel != "" {
+			activeLabel = c.ActiveAF + "/" + c.ActiveChannel
+		}
+		fmt.Printf("%-16s  %-12s active=%s clients=%d%s%s%s\n",
+			c.ControllerID, c.State, activeLabel, c.ClientCount, authStr, syncStr, macStr)
+		for _, key := range sortedKeys(c.Endpoints) {
+			ep := c.Endpoints[key]
 			connStr := "down"
 			if ep.Connected {
 				connStr = "up"
 			}
-			fmt.Printf("  %s: %s (%s)\n", af, ep.Addr, connStr)
+			fmt.Printf("  %s: %s (%s)\n", key, ep.Addr, connStr)
 		}
 	}
 }
@@ -318,6 +355,7 @@ type showRouteCLIEntry struct {
 	NextHop    string              `json:"nexthop,omitempty"`
 	NextHopIP  string              `json:"nexthop_ip,omitempty"`
 	AF         string              `json:"af,omitempty"`
+	Channel    string              `json:"channel,omitempty"`
 	Installed  bool                `json:"installed"`
 	Controller string              `json:"controller,omitempty"`
 }
@@ -378,7 +416,11 @@ func vxccliShowRoute(sockPath string, ctrlID string) {
 		// Build nexthop info
 		nhStr := ""
 		if r.NextHop != "" {
-			nhStr = fmt.Sprintf("  nhop=%s(%s) af=%s", r.NextHop, r.NextHopIP, r.AF)
+			link := r.AF
+			if r.Channel != "" {
+				link = r.AF + "/" + r.Channel
+			}
+			nhStr = fmt.Sprintf("  nhop=%s(%s) via=%s", r.NextHop, r.NextHopIP, link)
 		}
 
 		// Installed status

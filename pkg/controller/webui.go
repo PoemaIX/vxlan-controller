@@ -60,8 +60,11 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 			cj.Routes = append(cj.Routes, cr)
 		}
 
-		for af, ep := range ci.Endpoints {
-			cj.Endpoints[string(af)] = webui.EndpointJSON{IP: ep.IP.String()}
+		for af, chans := range ci.Endpoints {
+			for ch, ep := range chans {
+				key := string(af) + "/" + string(ch)
+				cj.Endpoints[key] = webui.EndpointJSON{IP: ep.IP.String()}
+			}
 		}
 
 		snap.Clients = append(snap.Clients, cj)
@@ -96,6 +99,7 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 				Dst:     dst.Hex(),
 				Latency: latency,
 				AF:      string(bp.AF),
+				Channel: string(bp.Channel),
 			})
 		}
 		snap.LatencyMatrix = append(snap.LatencyMatrix, row)
@@ -109,6 +113,7 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 				Dst:     dst.Hex(),
 				NextHop: entry.NextHop.Hex(),
 				AF:      string(entry.AF),
+				Channel: string(entry.Channel),
 			})
 		}
 		snap.RouteMatrix = append(snap.RouteMatrix, row)
