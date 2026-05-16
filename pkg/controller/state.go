@@ -179,6 +179,9 @@ func clientInfoToProto(ci *ClientInfo, overrides map[OverrideKey]string) *pb.Cli
 				ChannelName:  string(ch),
 				ProbePort:    uint32(ep.ProbePort),
 				VxlanDstPort: uint32(ep.VxlanDstPort),
+				IspName:      ep.IspName,
+				UpBwKbps:     ep.UpBwKbps,
+				DownBwKbps:   ep.DownBwKbps,
 			}
 			ip := ep.IP
 			if override, ok := overrides[OverrideKey{AF: af, Channel: ch}]; ok && override != "" {
@@ -252,6 +255,9 @@ func ProtoToClientInfo(p *pb.ClientInfoProto) *ClientInfo {
 		e := &types.Endpoint{
 			ProbePort:    uint16(ep.ProbePort),
 			VxlanDstPort: uint16(ep.VxlanDstPort),
+			IspName:      ep.IspName,
+			UpBwKbps:     ep.UpBwKbps,
+			DownBwKbps:   ep.DownBwKbps,
 		}
 		if len(ep.Ip) == 4 {
 			e.IP = netip.AddrFrom4([4]byte(ep.Ip))

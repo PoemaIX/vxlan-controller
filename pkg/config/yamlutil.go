@@ -246,6 +246,7 @@ func MarshalClientConfig(cfg *ClientConfig) ([]byte, error) {
 	m.Set("neigh_suppress", cfg.NeighSuppress)
 	m.Set("vxlan_firewall", cfg.VxlanFirewall)
 	m.Set("vxlan_firewall_table", cfg.VxlanFirewallTable)
+	m.Set("vxlan_rate_limit", cfg.VxlanRateLimit)
 
 	afs := newYAMLMap()
 	for _, name := range sortedAFNames(cfg.AFSettings) {
@@ -268,6 +269,10 @@ func MarshalClientConfig(cfg *ClientConfig) ([]byte, error) {
 	m.Set("api_socket", cfg.APISocket)
 	m.Set("sync_check_interval_s", int(cfg.SyncCheckInterval/time.Second))
 	m.Set("sync_check_max_delay", cfg.SyncCheckMaxDelay)
+
+	if len(cfg.ChannelAdditionalCosts) > 0 {
+		m.Set("channel_additional_costs", cfg.ChannelAdditionalCosts)
+	}
 
 	return m.Marshal()
 }
@@ -292,6 +297,15 @@ func marshalClientChannel(cc *ClientChannelConfig) *yaml.Node {
 	m.Set("forward_cost", cc.ForwardCost)
 	if cc.BindDevice != "" {
 		m.Set("bind_device", cc.BindDevice)
+	}
+	if cc.IspName != "" {
+		m.Set("isp_name", cc.IspName)
+	}
+	if cc.UpBwKbps != 0 {
+		m.Set("up_bw_kbps", cc.UpBwKbps)
+	}
+	if cc.DownBwKbps != 0 {
+		m.Set("down_bw_kbps", cc.DownBwKbps)
 	}
 
 	if len(cc.Controllers) > 0 {

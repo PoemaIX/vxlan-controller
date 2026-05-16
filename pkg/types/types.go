@@ -43,6 +43,14 @@ type Endpoint struct {
 	IP           netip.Addr
 	ProbePort    uint16
 	VxlanDstPort uint16
+	// IspName is the operator-assigned label for this uplink (e.g. "hinet").
+	// Empty defaults to the channel name. Used by peers to match
+	// channel_additional_costs rules.
+	IspName string
+	// Advertised bandwidth in kbit/s, used by the sender's rate limiter to
+	// avoid overwhelming a slow peer. 0 = unset (treated as unlimited).
+	UpBwKbps   uint64
+	DownBwKbps uint64
 }
 
 // PerClientConfig is the Controller's per-client configuration.

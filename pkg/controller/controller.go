@@ -392,6 +392,9 @@ func (c *Controller) handleTCPConn(af types.AFName, ch types.ChannelName, conn n
 		ep := &types.Endpoint{
 			ProbePort:    uint16(afep.ProbePort),
 			VxlanDstPort: uint16(afep.VxlanDstPort),
+			IspName:      afep.IspName,
+			UpBwKbps:     afep.UpBwKbps,
+			DownBwKbps:   afep.DownBwKbps,
 		}
 		// For the (af, ch) slot of THIS connection, overwrite IP with the
 		// observed remote address; for other slots, keep prior IP if known.

@@ -20,6 +20,8 @@ TESTS=(
     "test_multichannel_connectivity.sh"
     "test_multichannel_sockopts.sh"
     "test_multichannel_failover.sh"
+    "test_multichannel_extracost.sh"
+    "test_multichannel_ratelimit.sh"
 )
 
 total=0

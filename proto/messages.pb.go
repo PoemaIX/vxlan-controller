@@ -94,11 +94,18 @@ func (x *ClientRegister) GetEndpoints() []*AFEndpoint {
 }
 
 type AFEndpoint struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AfName        string                 `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
-	ChannelName   string                 `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
-	ProbePort     uint32                 `protobuf:"varint,1,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"`
-	VxlanDstPort  uint32                 `protobuf:"varint,2,opt,name=vxlan_dst_port,json=vxlanDstPort,proto3" json:"vxlan_dst_port,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	AfName       string                 `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName  string                 `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
+	ProbePort    uint32                 `protobuf:"varint,1,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"`
+	VxlanDstPort uint32                 `protobuf:"varint,2,opt,name=vxlan_dst_port,json=vxlanDstPort,proto3" json:"vxlan_dst_port,omitempty"`
+	// Optional ISP label for this channel — used by peers to match
+	// ChannelAdditionalCost rules. Empty defaults to the channel_name.
+	IspName string `protobuf:"bytes,5,opt,name=isp_name,json=ispName,proto3" json:"isp_name,omitempty"`
+	// Optional advertised bandwidth in kbit/s. 0 = unset (treated as
+	// "unknown/unlimited" by the rate-limit calculation).
+	UpBwKbps      uint64 `protobuf:"varint,6,opt,name=up_bw_kbps,json=upBwKbps,proto3" json:"up_bw_kbps,omitempty"`
+	DownBwKbps    uint64 `protobuf:"varint,7,opt,name=down_bw_kbps,json=downBwKbps,proto3" json:"down_bw_kbps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -157,6 +164,27 @@ func (x *AFEndpoint) GetProbePort() uint32 {
 func (x *AFEndpoint) GetVxlanDstPort() uint32 {
 	if x != nil {
 		return x.VxlanDstPort
+	}
+	return 0
+}
+
+func (x *AFEndpoint) GetIspName() string {
+	if x != nil {
+		return x.IspName
+	}
+	return ""
+}
+
+func (x *AFEndpoint) GetUpBwKbps() uint64 {
+	if x != nil {
+		return x.UpBwKbps
+	}
+	return 0
+}
+
+func (x *AFEndpoint) GetDownBwKbps() uint64 {
+	if x != nil {
+		return x.DownBwKbps
 	}
 	return 0
 }
@@ -470,6 +498,9 @@ type EndpointProto struct {
 	Ip            []byte                 `protobuf:"bytes,1,opt,name=ip,proto3" json:"ip,omitempty"` // 4 or 16 bytes
 	ProbePort     uint32                 `protobuf:"varint,2,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"`
 	VxlanDstPort  uint32                 `protobuf:"varint,3,opt,name=vxlan_dst_port,json=vxlanDstPort,proto3" json:"vxlan_dst_port,omitempty"`
+	IspName       string                 `protobuf:"bytes,6,opt,name=isp_name,json=ispName,proto3" json:"isp_name,omitempty"`
+	UpBwKbps      uint64                 `protobuf:"varint,7,opt,name=up_bw_kbps,json=upBwKbps,proto3" json:"up_bw_kbps,omitempty"`
+	DownBwKbps    uint64                 `protobuf:"varint,8,opt,name=down_bw_kbps,json=downBwKbps,proto3" json:"down_bw_kbps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -535,6 +566,27 @@ func (x *EndpointProto) GetProbePort() uint32 {
 func (x *EndpointProto) GetVxlanDstPort() uint32 {
 	if x != nil {
 		return x.VxlanDstPort
+	}
+	return 0
+}
+
+func (x *EndpointProto) GetIspName() string {
+	if x != nil {
+		return x.IspName
+	}
+	return ""
+}
+
+func (x *EndpointProto) GetUpBwKbps() uint64 {
+	if x != nil {
+		return x.UpBwKbps
+	}
+	return 0
+}
+
+func (x *EndpointProto) GetDownBwKbps() uint64 {
+	if x != nil {
+		return x.DownBwKbps
 	}
 	return 0
 }
@@ -1916,14 +1968,19 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\tclient_id\x18\x01 \x01(\fR\bclientId\x12\x17\n" +
 	"\aaf_name\x18\x03 \x01(\tR\x06afName\x12!\n" +
 	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\x129\n" +
-	"\tendpoints\x18\x02 \x03(\v2\x1b.vxlancontroller.AFEndpointR\tendpoints\"\x8d\x01\n" +
+	"\tendpoints\x18\x02 \x03(\v2\x1b.vxlancontroller.AFEndpointR\tendpoints\"\xe8\x01\n" +
 	"\n" +
 	"AFEndpoint\x12\x17\n" +
 	"\aaf_name\x18\x03 \x01(\tR\x06afName\x12!\n" +
 	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\x12\x1d\n" +
 	"\n" +
 	"probe_port\x18\x01 \x01(\rR\tprobePort\x12$\n" +
-	"\x0evxlan_dst_port\x18\x02 \x01(\rR\fvxlanDstPort\"\x8e\x01\n" +
+	"\x0evxlan_dst_port\x18\x02 \x01(\rR\fvxlanDstPort\x12\x19\n" +
+	"\bisp_name\x18\x05 \x01(\tR\aispName\x12\x1c\n" +
+	"\n" +
+	"up_bw_kbps\x18\x06 \x01(\x04R\bupBwKbps\x12 \n" +
+	"\fdown_bw_kbps\x18\a \x01(\x04R\n" +
+	"downBwKbps\"\x8e\x01\n" +
 	"\tMACUpdate\x123\n" +
 	"\x06routes\x18\x01 \x03(\v2\x1b.vxlancontroller.Type2RouteR\x06routes\x12\x17\n" +
 	"\ais_full\x18\x02 \x01(\bR\x06isFull\x12\x1d\n" +
@@ -1953,14 +2010,19 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\x06routes\x18\x04 \x03(\v2\x1b.vxlancontroller.Type2RouteR\x06routes\x12'\n" +
 	"\x0fadditional_cost\x18\x05 \x01(\x01R\x0eadditionalCost\x12\x1f\n" +
 	"\vclient_name\x18\x06 \x01(\tR\n" +
-	"clientName\"\xa0\x01\n" +
+	"clientName\"\xfb\x01\n" +
 	"\rEndpointProto\x12\x17\n" +
 	"\aaf_name\x18\x04 \x01(\tR\x06afName\x12!\n" +
 	"\fchannel_name\x18\x05 \x01(\tR\vchannelName\x12\x0e\n" +
 	"\x02ip\x18\x01 \x01(\fR\x02ip\x12\x1d\n" +
 	"\n" +
 	"probe_port\x18\x02 \x01(\rR\tprobePort\x12$\n" +
-	"\x0evxlan_dst_port\x18\x03 \x01(\rR\fvxlanDstPort\"\xab\x04\n" +
+	"\x0evxlan_dst_port\x18\x03 \x01(\rR\fvxlanDstPort\x12\x19\n" +
+	"\bisp_name\x18\x06 \x01(\tR\aispName\x12\x1c\n" +
+	"\n" +
+	"up_bw_kbps\x18\a \x01(\x04R\bupBwKbps\x12 \n" +
+	"\fdown_bw_kbps\x18\b \x01(\x04R\n" +
+	"downBwKbps\"\xab\x04\n" +
 	"\x15ControllerStateUpdate\x12D\n" +
 	"\rclient_joined\x18\x01 \x01(\v2\x1d.vxlancontroller.ClientJoinedH\x00R\fclientJoined\x12>\n" +
 	"\vclient_left\x18\x02 \x01(\v2\x1b.vxlancontroller.ClientLeftH\x00R\n" +

@@ -15,26 +15,39 @@ import (
 
 // ClientConfig is the parsed client configuration.
 type ClientConfig struct {
-	PrivateKey         [32]byte
-	BridgeName         string
-	ClampMSSToMTU      bool
-	ClampMSSTable      string
-	NeighSuppress      bool
-	VxlanFirewall      bool
-	VxlanFirewallTable string
-	AFSettings         map[types.AFName]map[types.ChannelName]*ClientChannelConfig
-	InitTimeout        time.Duration
-	StatsInterval      time.Duration
-	ProbeWindowSize    int
-	AFSwitchCost       float64
-	NTPServers         []string
-	NTPPeriod          time.Duration
-	NTPRTTThreshold    time.Duration
-	Filters            *filter.FilterConfig
-	LogLevel           string
-	APISocket          string
-	SyncCheckInterval  time.Duration
-	SyncCheckMaxDelay  uint64
+	PrivateKey             [32]byte
+	BridgeName             string
+	ClampMSSToMTU          bool
+	ClampMSSTable          string
+	NeighSuppress          bool
+	VxlanFirewall          bool
+	VxlanFirewallTable     string
+	VxlanRateLimit         bool
+	AFSettings             map[types.AFName]map[types.ChannelName]*ClientChannelConfig
+	ChannelAdditionalCosts []ChannelAdditionalCost
+	InitTimeout            time.Duration
+	StatsInterval          time.Duration
+	ProbeWindowSize        int
+	AFSwitchCost           float64
+	NTPServers             []string
+	NTPPeriod              time.Duration
+	NTPRTTThreshold        time.Duration
+	Filters                *filter.FilterConfig
+	LogLevel               string
+	APISocket              string
+	SyncCheckInterval      time.Duration
+	SyncCheckMaxDelay      uint64
+}
+
+// ChannelAdditionalCost is one rule of the local cost overlay. "*" matches
+// any value. All matching rules sum their Cost into the final probe cost
+// when computing routes toward a peer's (af, channel). The legacy global
+// AdditionalCost / per-channel ForwardCost still apply unchanged on top.
+type ChannelAdditionalCost struct {
+	Peer string  `yaml:"peer"` // peer client_name, "*" for any
+	AF   string  `yaml:"af"`   // af name (e.g. "v4"), "*" for any
+	ISP  string  `yaml:"isp"`  // isp_name (or channel name if isp_name unset), "*" for any
+	Cost float64 `yaml:"cost"`
 }
 
 // ClientChannelConfig is the per-(AF, channel) configuration on a client.
@@ -46,6 +59,13 @@ type ClientChannelConfig struct {
 	AutoIPInterface   string
 	AddrSelectScript  string // resolved Lua code for addr selection
 	BindDevice        string // optional: SO_BINDTODEVICE on control sockets + IFLA_VXLAN_LINK on the vxlan device
+	// IspName: human-readable label advertised to peers (e.g. "hinet").
+	// Defaults to the channel name if empty.
+	IspName string
+	// Advertised bandwidth in kbit/s; sender uses these to rate-limit egress
+	// to a peer (peer's down vs. our up). 0 = unset/unlimited.
+	UpBwKbps          uint64
+	DownBwKbps        uint64
 	ProbePort         uint16
 	CommunicationPort uint16
 	VxlanName         string
@@ -102,6 +122,9 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 		return nil, nil, err
 	}
 	if err := trackedSet(&cfg.VxlanFirewallTable, m, "vxlan_firewall_table", dt); err != nil {
+		return nil, nil, err
+	}
+	if err := trackedSet(&cfg.VxlanRateLimit, m, "vxlan_rate_limit", dt); err != nil {
 		return nil, nil, err
 	}
 	if err := trackedSet(&cfg.ProbeWindowSize, m, "probe_window_size", dt); err != nil {
@@ -177,6 +200,26 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 		return nil, nil, err
 	}
 
+	// Channel additional cost overlay (peer × af × isp)
+	if n, ok := m["channel_additional_costs"]; ok && n.Kind == yaml.SequenceNode {
+		var rules []ChannelAdditionalCost
+		if err := n.Decode(&rules); err != nil {
+			return nil, nil, fmt.Errorf("channel_additional_costs: %w", err)
+		}
+		for i := range rules {
+			if rules[i].Peer == "" {
+				rules[i].Peer = "*"
+			}
+			if rules[i].AF == "" {
+				rules[i].AF = "*"
+			}
+			if rules[i].ISP == "" {
+				rules[i].ISP = "*"
+			}
+		}
+		cfg.ChannelAdditionalCosts = rules
+	}
+
 	return cfg, dt.result(), nil
 }
 
@@ -241,6 +284,15 @@ func overlayClientChannel(afName types.AFName, chName types.ChannelName, node *y
 		return nil, err
 	}
 	if err := trackedSet(&base.BindDevice, m, "bind_device", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.IspName, m, "isp_name", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.UpBwKbps, m, "up_bw_kbps", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.DownBwKbps, m, "down_bw_kbps", dt); err != nil {
 		return nil, err
 	}
 

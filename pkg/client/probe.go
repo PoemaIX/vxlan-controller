@@ -524,11 +524,13 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	// (af, channel) hysteresis + final cost computation
 	switchCost := c.Config.AFSwitchCost
 	for _, peer := range peers {
-		// Step 1: compute base cost (quality_cost + forward_cost, without switch_cost) per (af, channel)
+		// Step 1: compute base cost (quality_cost + forward_cost + per-rule
+		// channel_additional_cost, without switch_cost) per (af, channel).
 		type afChEntry struct {
-			af       types.AFName
-			channel  types.ChannelName
-			baseCost float64
+			af         types.AFName
+			channel    types.ChannelName
+			baseCost   float64 // includes channel_additional_cost
+			extraCost  float64 // the channel_additional_cost portion alone
 		}
 		var reachable []afChEntry
 		for af, chans := range c.Config.AFSettings {
@@ -539,8 +541,9 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 					continue
 				}
 				qualityCost := db.local.LatencyMean
-				baseCost := qualityCost + db.result.ForwardCost
-				reachable = append(reachable, afChEntry{af: af, channel: ch, baseCost: baseCost})
+				extraCost := c.lookupChannelAdditionalCost(peer.info, af, ch)
+				baseCost := qualityCost + db.result.ForwardCost + extraCost
+				reachable = append(reachable, afChEntry{af: af, channel: ch, baseCost: baseCost, extraCost: extraCost})
 			}
 		}
 
@@ -576,14 +579,18 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 				c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Channel: best.channel}
 			} else {
 				prefQuality := prefDB.local.LatencyMean
-				prefBaseCost := prefQuality + prefDB.result.ForwardCost
+				prefExtra := c.lookupChannelAdditionalCost(peer.info, curPref.AF, curPref.Channel)
+				prefBaseCost := prefQuality + prefDB.result.ForwardCost + prefExtra
 				if prefBaseCost-best.baseCost > switchCost {
 					c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Channel: best.channel}
 				}
 			}
 		}
 
-		// Step 4: set quality_cost, switch_cost and compute final_cost
+		// Step 4: set quality_cost, switch_cost and compute final_cost.
+		// Bake the per-rule channel_additional_cost into final_cost so the
+		// controller's Floyd-Warshall and every other client see the same
+		// asymmetric cost we use locally for hysteresis.
 		pref := c.preferredAFChannel[peer.clientID]
 		for af, chans := range c.Config.AFSettings {
 			for ch := range chans {
@@ -593,7 +600,8 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 					continue
 				}
 				qualityCost := db.local.LatencyMean
-				baseCost := qualityCost + db.result.ForwardCost
+				extraCost := c.lookupChannelAdditionalCost(peer.info, af, ch)
+				baseCost := qualityCost + db.result.ForwardCost + extraCost
 				db.result.QualityCost = qualityCost
 				if af == pref.AF && ch == pref.Channel {
 					db.result.SwitchCost = 0
@@ -699,6 +707,56 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 type peerInfo struct {
 	clientID types.ClientID
 	info     *ClientInfoView
+}
+
+// lookupChannelAdditionalCost returns the sum of every channel_additional_costs
+// rule that matches (peer's client_name, af, peer's isp_name-on-this-channel).
+// "*" matches any value, empty rule field is treated as "*".
+// Falls back to channel_name when the peer didn't advertise an isp_name.
+//
+// Must be called with c.mu held (reads c.Config which is immutable, but
+// access via peer.info is shared).
+func (c *Client) lookupChannelAdditionalCost(peer *ClientInfoView, af types.AFName, ch types.ChannelName) float64 {
+	if len(c.Config.ChannelAdditionalCosts) == 0 {
+		return 0
+	}
+	isp := ""
+	if peer != nil {
+		if chs, ok := peer.Endpoints[af]; ok {
+			if ep, ok2 := chs[ch]; ok2 {
+				isp = ep.IspName
+			}
+		}
+	}
+	if isp == "" {
+		isp = string(ch)
+	}
+	peerName := ""
+	if peer != nil {
+		peerName = peer.ClientName
+	}
+	total := 0.0
+	for _, rule := range c.Config.ChannelAdditionalCosts {
+		if !matchRule(rule.Peer, peerName) {
+			continue
+		}
+		if !matchRule(rule.AF, string(af)) {
+			continue
+		}
+		if !matchRule(rule.ISP, isp) {
+			continue
+		}
+		total += rule.Cost
+	}
+	return total
+}
+
+// matchRule returns true when pattern == "*" / "" or pattern == value.
+func matchRule(pattern, value string) bool {
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+	return pattern == value
 }
 
 func (c *Client) initiateProbeHandshake(af types.AFName, ch types.ChannelName, peerID types.ClientID, ep *types.Endpoint) {

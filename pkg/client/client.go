@@ -87,9 +87,13 @@ type Client struct {
 	// Channels
 	fdbNotifyCh       chan struct{}
 	fwNotifyCh        chan struct{}
+	rlNotifyCh        chan struct{}
 	authorityChangeCh chan struct{}
 	tapInjectCh       chan []byte
 	initDone          chan struct{}
+
+	// Rate limit state
+	rlState *rateLimitState
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -206,9 +210,11 @@ func New(cfg *config.ClientConfig) *Client {
 		preferredAFChannel: make(map[types.ClientID]AFChannel),
 		fdbNotifyCh:        make(chan struct{}, 1),
 		fwNotifyCh:         make(chan struct{}, 1),
+		rlNotifyCh:         make(chan struct{}, 1),
 		authorityChangeCh:  make(chan struct{}, 1),
 		tapInjectCh:        make(chan []byte, 256),
 		initDone:           make(chan struct{}),
+		rlState:            newRateLimitState(),
 		ctx:                ctx,
 		cancel:             cancel,
 	}
@@ -334,6 +340,9 @@ func (c *Client) Run() error {
 	// Step 8b: Start firewall peer sync loop
 	go c.firewallLoop()
 
+	// Step 8b2: Start rate-limit reconciler
+	go c.rateLimitLoop()
+
 	// Step 8c: Start mcast stats reporter
 	go c.mcastStatsReportLoop()
 
@@ -373,6 +382,7 @@ func (c *Client) Stop() {
 		c.cleanupNftables()
 	}
 	c.cleanupFirewall()
+	c.cleanupRateLimits()
 
 	c.mu.Lock()
 	for _, cc := range c.Controllers {
@@ -516,11 +526,18 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 			if !cc.Enable {
 				continue
 			}
+			isp := cc.IspName
+			if isp == "" {
+				isp = string(chn)
+			}
 			reg.Endpoints = append(reg.Endpoints, &pb.AFEndpoint{
 				AfName:       string(afn),
 				ChannelName:  string(chn),
 				ProbePort:    uint32(cc.ProbePort),
 				VxlanDstPort: uint32(cc.VxlanDstPort),
+				IspName:      isp,
+				UpBwKbps:     cc.UpBwKbps,
+				DownBwKbps:   cc.DownBwKbps,
 			})
 		}
 	}
@@ -783,6 +800,7 @@ func (c *Client) handleControllerState(ctrlID types.ControllerID, af types.AFNam
 
 	c.notifyFDB()
 	c.notifyFirewall()
+	c.notifyRateLimit()
 }
 
 func (c *Client) handleControllerStateUpdate(ctrlID types.ControllerID, payload []byte) {
@@ -846,6 +864,7 @@ func (c *Client) handleControllerStateUpdate(ctrlID types.ControllerID, payload 
 	c.notifyFDB()
 	if clientsChanged {
 		c.notifyFirewall()
+		c.notifyRateLimit()
 	}
 }
 
@@ -897,6 +916,9 @@ func protoToClientInfoView(p *pb.ClientInfoProto) *ClientInfoView {
 		e := &types.Endpoint{
 			ProbePort:    uint16(ep.ProbePort),
 			VxlanDstPort: uint16(ep.VxlanDstPort),
+			IspName:      ep.IspName,
+			UpBwKbps:     ep.UpBwKbps,
+			DownBwKbps:   ep.DownBwKbps,
 		}
 		if len(ep.Ip) == 4 {
 			e.IP = netip.AddrFrom4([4]byte(ep.Ip))
