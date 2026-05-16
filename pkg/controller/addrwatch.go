@@ -7,6 +7,7 @@ import (
 
 	"vxlan-controller/pkg/crypto"
 	"vxlan-controller/pkg/filter"
+	"vxlan-controller/pkg/sockopt"
 	"vxlan-controller/pkg/types"
 	"vxlan-controller/pkg/vlog"
 
@@ -233,15 +234,16 @@ func (c *Controller) rebindAFListener(af types.AFName, ch types.ChannelName, old
 
 	// Retry bind with backoff (IPv6 DAD may delay address availability)
 	bindStr := netip.AddrPortFrom(newAddr, cc.CommunicationPort).String()
+	sockOpts := sockopt.Options{BindDevice: cc.BindDevice}
+	lc := net.ListenConfig{Control: sockopt.ControlFn(sockOpts)}
 	var tcpListener net.Listener
-	var udpConn *net.UDPConn
+	var udpConn net.PacketConn
 	var err error
 
 	for attempt := 0; attempt < 10; attempt++ {
-		tcpListener, err = net.Listen("tcp", bindStr)
+		tcpListener, err = lc.Listen(c.ctx, "tcp", bindStr)
 		if err == nil {
-			udpAddr, _ := net.ResolveUDPAddr("udp", bindStr)
-			udpConn, err = net.ListenUDP("udp", udpAddr)
+			udpConn, err = lc.ListenPacket(c.ctx, "udp", bindStr)
 			if err == nil {
 				break
 			}

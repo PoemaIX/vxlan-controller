@@ -54,6 +54,7 @@ type ControllerChannelConfig struct {
 	BindAddr          netip.Addr
 	AutoIPInterface   string
 	AddrSelectScript  string // resolved Lua code for addr selection
+	BindDevice        string // optional: SO_BINDTODEVICE on this channel's listening sockets
 	CommunicationPort uint16
 	VxlanVNI          uint32
 	VxlanDstPort      uint16
@@ -280,6 +281,9 @@ func overlayControllerChannel(afName types.AFName, chName types.ChannelName, nod
 		return nil, err
 	}
 	if err := trackedSet(&base.VxlanSrcPortEnd, m, "vxlan_src_port_end", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.BindDevice, m, "bind_device", dt); err != nil {
 		return nil, err
 	}
 

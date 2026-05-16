@@ -24,6 +24,7 @@ import (
 	"vxlan-controller/pkg/filter"
 	"vxlan-controller/pkg/ntp"
 	"vxlan-controller/pkg/protocol"
+	"vxlan-controller/pkg/sockopt"
 	"vxlan-controller/pkg/types"
 
 	pb "vxlan-controller/proto"
@@ -456,9 +457,11 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 		IP: cfgc.BindAddr.AsSlice(),
 	}
 
+	sockOpts := sockopt.Options{BindDevice: cfgc.BindDevice}
 	dialer := net.Dialer{
 		LocalAddr: localAddr,
 		Timeout:   10 * time.Second,
+		Control:   sockopt.ControlFn(sockOpts),
 	}
 
 	conn, err := dialer.DialContext(c.ctx, "tcp", ctrl.Addr.String())
@@ -536,13 +539,9 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 	// Setup AF connection
 	afCtx, afCancel := context.WithCancel(c.ctx)
 
-	commUDPAddr, err := net.ResolveUDPAddr("udp", netip.AddrPortFrom(cfgc.BindAddr, 0).String())
-	if err != nil {
-		conn.Close()
-		afCancel()
-		return fmt.Errorf("resolve udp: %w", err)
-	}
-	commUDPConn, err := net.ListenUDP("udp", commUDPAddr)
+	commBindStr := netip.AddrPortFrom(cfgc.BindAddr, 0).String()
+	lc := net.ListenConfig{Control: sockopt.ControlFn(sockOpts)}
+	commUDPConn, err := lc.ListenPacket(c.ctx, "udp", commBindStr)
 	if err != nil {
 		conn.Close()
 		afCancel()
@@ -607,7 +606,7 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 	return fmt.Errorf("connection closed")
 }
 
-func (c *Client) setupUDPSession(ctrl config.ControllerEndpoint, conn *net.UDPConn) *crypto.Session {
+func (c *Client) setupUDPSession(ctrl config.ControllerEndpoint, conn net.PacketConn) *crypto.Session {
 	localIndex := crypto.NewSessionManager().AllocateIndex()
 	initMsg, state, err := crypto.HandshakeInitiate(c.PrivateKey, ctrl.PubKey, localIndex)
 	if err != nil {
@@ -621,11 +620,14 @@ func (c *Client) setupUDPSession(ctrl config.ControllerEndpoint, conn *net.UDPCo
 		return nil
 	}
 
-	conn.WriteToUDP(initMsg, ctrlAddr)
+	if _, err := conn.WriteTo(initMsg, ctrlAddr); err != nil {
+		vlog.Warnf("[Client] UDP handshake send error: %v", err)
+		return nil
+	}
 
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 65536)
-	n, _, err := conn.ReadFromUDP(buf)
+	n, _, err := conn.ReadFrom(buf)
 	conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		vlog.Warnf("[Client] UDP handshake response timeout: %v", err)

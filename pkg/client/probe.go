@@ -13,6 +13,7 @@ import (
 
 	"vxlan-controller/pkg/crypto"
 	"vxlan-controller/pkg/protocol"
+	"vxlan-controller/pkg/sockopt"
 	"vxlan-controller/pkg/types"
 	"vxlan-controller/pkg/vlog"
 
@@ -31,16 +32,15 @@ func (c *Client) probeListenLoop(af types.AFName, ch types.ChannelName) {
 	}
 	bindStr := netip.AddrPortFrom(cc.BindAddr, cc.ProbePort).String()
 
-	udpAddr, err := net.ResolveUDPAddr("udp", bindStr)
-	if err != nil {
-		vlog.Errorf("[Client] probe listen: resolve error for %s/%s: %v", af, ch, err)
-		return
+	lc := net.ListenConfig{
+		Control: sockopt.ControlFn(sockopt.Options{BindDevice: cc.BindDevice}),
 	}
 
 	// Retry bind with backoff (IPv6 DAD may delay address availability)
-	var conn *net.UDPConn
+	var pc net.PacketConn
+	var err error
 	for attempt := 0; attempt < 10; attempt++ {
-		conn, err = net.ListenUDP("udp", udpAddr)
+		pc, err = lc.ListenPacket(c.ctx, "udp", bindStr)
 		if err == nil {
 			break
 		}
@@ -52,6 +52,12 @@ func (c *Client) probeListenLoop(af types.AFName, ch types.ChannelName) {
 	}
 	if err != nil {
 		vlog.Errorf("[Client] probe listen error on %s after retries: %v", bindStr, err)
+		return
+	}
+	conn, ok := pc.(*net.UDPConn)
+	if !ok {
+		pc.Close()
+		vlog.Errorf("[Client] probe listen on %s: unexpected conn type %T", bindStr, pc)
 		return
 	}
 	defer conn.Close()

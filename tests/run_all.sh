@@ -17,6 +17,9 @@ TESTS=(
     "test_ip_change.sh"
     "test_no_flood.sh"
     "test_firewall.sh"
+    "test_multichannel_connectivity.sh"
+    "test_multichannel_sockopts.sh"
+    "test_multichannel_failover.sh"
 )
 
 total=0

@@ -45,6 +45,7 @@ type ClientChannelConfig struct {
 	BindAddr          netip.Addr
 	AutoIPInterface   string
 	AddrSelectScript  string // resolved Lua code for addr selection
+	BindDevice        string // optional: SO_BINDTODEVICE on control sockets + IFLA_VXLAN_LINK on the vxlan device
 	ProbePort         uint16
 	CommunicationPort uint16
 	VxlanName         string
@@ -237,6 +238,9 @@ func overlayClientChannel(afName types.AFName, chName types.ChannelName, node *y
 		return nil, err
 	}
 	if err := trackedSet(&base.ForwardCost, m, "forward_cost", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.BindDevice, m, "bind_device", dt); err != nil {
 		return nil, err
 	}
 

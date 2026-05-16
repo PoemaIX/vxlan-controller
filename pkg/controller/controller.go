@@ -14,6 +14,7 @@ import (
 	"vxlan-controller/pkg/crypto"
 	"vxlan-controller/pkg/filter"
 	"vxlan-controller/pkg/protocol"
+	"vxlan-controller/pkg/sockopt"
 	"vxlan-controller/pkg/types"
 	"vxlan-controller/pkg/vlog"
 
@@ -235,18 +236,17 @@ func (c *Controller) Stop() {
 func (c *Controller) startAFListener(afName types.AFName, chName types.ChannelName, cc *config.ControllerChannelConfig) error {
 	bindStr := netip.AddrPortFrom(cc.BindAddr, cc.CommunicationPort).String()
 
+	sockOpts := sockopt.Options{BindDevice: cc.BindDevice}
+	lc := net.ListenConfig{Control: sockopt.ControlFn(sockOpts)}
+
 	// TCP listener
-	tcpListener, err := net.Listen("tcp", bindStr)
+	tcpListener, err := lc.Listen(c.ctx, "tcp", bindStr)
 	if err != nil {
 		return fmt.Errorf("tcp listen: %w", err)
 	}
 
 	// UDP listener
-	udpAddr, err := net.ResolveUDPAddr("udp", bindStr)
-	if err != nil {
-		return fmt.Errorf("resolve udp: %w", err)
-	}
-	udpConn, err := net.ListenUDP("udp", udpAddr)
+	udpConn, err := lc.ListenPacket(c.ctx, "udp", bindStr)
 	if err != nil {
 		tcpListener.Close()
 		return fmt.Errorf("udp listen: %w", err)

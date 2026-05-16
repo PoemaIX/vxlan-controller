@@ -290,6 +290,9 @@ func marshalClientChannel(cc *ClientChannelConfig) *yaml.Node {
 	m.Set("vxlan_src_port_end", cc.VxlanSrcPortEnd)
 	m.Set("priority", cc.Priority)
 	m.Set("forward_cost", cc.ForwardCost)
+	if cc.BindDevice != "" {
+		m.Set("bind_device", cc.BindDevice)
+	}
 
 	if len(cc.Controllers) > 0 {
 		seq := &yaml.Node{Kind: yaml.SequenceNode}
@@ -363,6 +366,9 @@ func marshalControllerChannel(cc *ControllerChannelConfig) *yaml.Node {
 	m.Set("vxlan_dst_port", cc.VxlanDstPort)
 	m.Set("vxlan_src_port_start", cc.VxlanSrcPortStart)
 	m.Set("vxlan_src_port_end", cc.VxlanSrcPortEnd)
+	if cc.BindDevice != "" {
+		m.Set("bind_device", cc.BindDevice)
+	}
 	return m.node
 }
 

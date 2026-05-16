@@ -58,11 +58,11 @@ func (a *AutogenAFChannels) UnmarshalYAML(value *yaml.Node) error {
 		(*a)[types.DefaultChannelName] = &AutogenAF{Bind: value.Value}
 		return nil
 	case yaml.MappingNode:
-		// Peek keys: if "bind" (or "ddns") is a top-level key, treat as single-channel shorthand.
+		// Peek keys: if any AutogenAF field is a top-level key, treat as single-channel shorthand.
 		isShorthand := false
 		for i := 0; i < len(value.Content); i += 2 {
 			k := value.Content[i].Value
-			if k == "bind" || k == "ddns" {
+			if k == "bind" || k == "ddns" || k == "bind_device" {
 				isShorthand = true
 				break
 			}
@@ -90,10 +90,12 @@ func (a *AutogenAFChannels) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // AutogenAF represents a per-channel bind config.
-// Supports shorthand "ISP1: 1.2.3.4" or full form "ISP1: {bind: eth3, ddns: host.example.com}".
+// Supports shorthand "ISP1: 1.2.3.4" or full form
+// "ISP1: {bind: eth3, ddns: host.example.com, bind_device: eth-isp1}".
 type AutogenAF struct {
-	Bind string `yaml:"bind"`
-	DDNS string `yaml:"ddns,omitempty"`
+	Bind       string `yaml:"bind"`
+	DDNS       string `yaml:"ddns,omitempty"`
+	BindDevice string `yaml:"bind_device,omitempty"`
 }
 
 func (a *AutogenAF) UnmarshalYAML(value *yaml.Node) error {
@@ -246,6 +248,7 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 			} else {
 				cc.BindAddr = netip.MustParseAddr(af.Bind)
 			}
+			cc.BindDevice = af.BindDevice
 			inner[chName] = cc
 		}
 		cfg.AFSettings[types.AFName(afName)] = inner
@@ -345,6 +348,7 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			} else {
 				cc.BindAddr = netip.MustParseAddr(af.Bind)
 			}
+			cc.BindDevice = af.BindDevice
 
 			// Add controllers that have this (af, channel)
 			for _, ctrlName := range ag.Controllers {

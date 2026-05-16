@@ -192,6 +192,13 @@ func (c *Client) createVxlanDevice(vd *VxlanDev, cc *config.ClientChannelConfig)
 		"nolearning",
 		"udp6zerocsumrx",
 	}
+	if cc.BindDevice != "" {
+		// IFLA_VXLAN_LINK: bind the vxlan tunnel to a specific physical
+		// device so the data plane stays on the same uplink as the
+		// SO_BINDTODEVICE'd control plane. Without this, the kernel does
+		// its own FIB lookup and can pick a different egress interface.
+		args = append(args, "dev", cc.BindDevice)
+	}
 	if cc.VxlanSrcPortStart > 0 && cc.VxlanSrcPortEnd > 0 {
 		args = append(args, "srcport",
 			fmt.Sprintf("%d", cc.VxlanSrcPortStart),
