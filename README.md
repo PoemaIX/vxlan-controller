@@ -25,7 +25,7 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
 ## Architecture
 
 ```
-┌──────────────┐         TCP (control)         ┌──────────────┐
+┌──────────────┐         TCP (control)          ┌──────────────┐
 │   Client 1   │◄────────────────────────────►  │  Controller  │
 │  (node-1)    │         UDP (broadcast)        │  (node-10)   │
 │              │◄────────────────────────────►  │              │
@@ -47,13 +47,6 @@ Single binary, all modes:
 
 ```bash
 go build -o vxlan-controller ./cmd/vxlan-controller
-```
-
-Optional symlinks for CLI convenience:
-
-```bash
-ln -s vxlan-controller /usr/local/bin/vxscli
-ln -s vxlan-controller /usr/local/bin/vxccli
 ```
 
 ## Quick Start with Autogen
