@@ -23,3 +23,5 @@ Thumbs.db
 vendor/
 .claude/*
 .codex/*
+
+demo/kskbix-topo.yaml
