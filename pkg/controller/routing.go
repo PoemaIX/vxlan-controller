@@ -5,6 +5,8 @@ import (
 )
 
 // computeRouteMatrix uses Floyd-Warshall on precomputed best paths.
+// Each direct edge's (af, channel) comes from the best-path selection between
+// the two endpoints.
 func computeRouteMatrix(
 	bestPaths map[types.ClientID]map[types.ClientID]*types.BestPathEntry,
 	clients map[types.ClientID]*ClientInfo,
@@ -25,11 +27,13 @@ func computeRouteMatrix(
 	cost := make([][]float64, n)
 	next := make([][]int, n)
 	afMatrix := make([][]types.AFName, n)
+	chMatrix := make([][]types.ChannelName, n)
 
 	for i := 0; i < n; i++ {
 		cost[i] = make([]float64, n)
 		next[i] = make([]int, n)
 		afMatrix[i] = make([]types.AFName, n)
+		chMatrix[i] = make([]types.ChannelName, n)
 		for j := 0; j < n; j++ {
 			if i == j {
 				cost[i][j] = 0
@@ -59,6 +63,7 @@ func computeRouteMatrix(
 				cost[srcI][dstI] = bp.Cost
 				next[srcI][dstI] = dstI
 				afMatrix[srcI][dstI] = bp.AF
+				chMatrix[srcI][dstI] = bp.Channel
 			}
 		}
 	}
@@ -77,7 +82,7 @@ func computeRouteMatrix(
 				if newCost < cost[i][j] {
 					cost[i][j] = newCost
 					next[i][j] = next[i][k]
-					// AF for i->j is the AF of the first hop (i->next[i][k])
+					// (af, channel) for i->j is that of the first hop i->next[i][k]
 				}
 			}
 		}
@@ -98,11 +103,12 @@ func computeRouteMatrix(
 			}
 			nextHopIdx := next[i][j]
 			nextHop := nodes[nextHopIdx]
-			// AF is for src->nextHop edge
 			af := afMatrix[i][nextHopIdx]
+			ch := chMatrix[i][nextHopIdx]
 			result[src][dst] = &types.RouteEntry{
 				NextHop: nextHop,
 				AF:      af,
+				Channel: ch,
 			}
 		}
 	}

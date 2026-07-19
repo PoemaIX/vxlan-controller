@@ -15,34 +15,57 @@ import (
 
 // ClientConfig is the parsed client configuration.
 type ClientConfig struct {
-	PrivateKey         [32]byte
-	BridgeName         string
-	ClampMSSToMTU      bool
-	ClampMSSTable      string
-	NeighSuppress      bool
-	VxlanFirewall      bool
-	VxlanFirewallTable string
-	AFSettings         map[types.AFName]*ClientAFConfig
-	InitTimeout        time.Duration
-	StatsInterval      time.Duration
-	ProbeWindowSize    int
-	AFSwitchCost       float64
-	NTPServers         []string
-	NTPPeriod          time.Duration
-	NTPRTTThreshold    time.Duration
-	Filters            *filter.FilterConfig
-	LogLevel           string
-	APISocket          string
-	SyncCheckInterval  time.Duration
-	SyncCheckMaxDelay  uint64
+	PrivateKey             [32]byte
+	BridgeName             string
+	ClampMSSToMTU          bool
+	ClampMSSTable          string
+	NeighSuppress          bool
+	VxlanFirewall          bool
+	VxlanFirewallTable     string
+	VxlanRateLimit         bool
+	AFSettings             map[types.AFName]map[types.ChannelName]*ClientChannelConfig
+	ChannelAdditionalCosts []ChannelAdditionalCost
+	InitTimeout            time.Duration
+	StatsInterval          time.Duration
+	ProbeWindowSize        int
+	AFSwitchCost           float64
+	NTPServers             []string
+	NTPPeriod              time.Duration
+	NTPRTTThreshold        time.Duration
+	Filters                *filter.FilterConfig
+	LogLevel               string
+	APISocket              string
+	SyncCheckInterval      time.Duration
+	SyncCheckMaxDelay      uint64
 }
 
-type ClientAFConfig struct {
-	Name              types.AFName
+// ChannelAdditionalCost is one rule of the local cost overlay. "*" matches
+// any value. All matching rules sum their Cost into the final probe cost
+// when computing routes toward a peer's (af, channel). The legacy global
+// AdditionalCost / per-channel ForwardCost still apply unchanged on top.
+type ChannelAdditionalCost struct {
+	Peer string  `yaml:"peer"` // peer client_name, "*" for any
+	AF   string  `yaml:"af"`   // af name (e.g. "v4"), "*" for any
+	ISP  string  `yaml:"isp"`  // isp_name (or channel name if isp_name unset), "*" for any
+	Cost float64 `yaml:"cost"`
+}
+
+// ClientChannelConfig is the per-(AF, channel) configuration on a client.
+type ClientChannelConfig struct {
+	AF                types.AFName
+	Channel           types.ChannelName
 	Enable            bool
 	BindAddr          netip.Addr
 	AutoIPInterface   string
 	AddrSelectScript  string // resolved Lua code for addr selection
+	BindDevice        string // optional: SO_BINDTODEVICE on control sockets + IFLA_VXLAN_LINK on the vxlan device
+	// IspName: human-readable label advertised to peers (e.g. "hinet").
+	// Defaults to the channel name if empty.
+	IspName string
+	// Advertised bandwidth in kbit/s; sender uses these to rate-limit egress
+	// to a peer (peer's down vs. our up). 0 = unset/unlimited.
+	UpBwKbps          uint64
+	DownBwKbps        uint64
 	ProbePort         uint16
 	CommunicationPort uint16
 	VxlanName         string
@@ -101,6 +124,9 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 	if err := trackedSet(&cfg.VxlanFirewallTable, m, "vxlan_firewall_table", dt); err != nil {
 		return nil, nil, err
 	}
+	if err := trackedSet(&cfg.VxlanRateLimit, m, "vxlan_rate_limit", dt); err != nil {
+		return nil, nil, err
+	}
 	if err := trackedSet(&cfg.ProbeWindowSize, m, "probe_window_size", dt); err != nil {
 		return nil, nil, err
 	}
@@ -147,40 +173,79 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 		cfg.Filters = filter.ParseFilterNode(n, configDir)
 	}
 
-	// AF settings (map overlay: keys from user, values default from matching or first default AF)
+	// AF settings: outer map = AF, inner map = channel.
 	if afNode, ok := m["address_families"]; ok {
-		cfg.AFSettings = make(map[types.AFName]*ClientAFConfig)
+		cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig)
 		afMap := nodeMap(afNode)
-		for name, afValueNode := range afMap {
-			afDt := dt.sub("address_families." + name)
-			af, err := overlayClientAF(name, afValueNode, afDt)
-			if err != nil {
-				return nil, nil, fmt.Errorf("af %s: %w", name, err)
+		for afNameStr, chanNode := range afMap {
+			afName := types.AFName(afNameStr)
+			chanMap := nodeMap(chanNode)
+			if chanMap == nil {
+				return nil, nil, fmt.Errorf("af %s: expected channel mapping", afNameStr)
 			}
-			cfg.AFSettings[types.AFName(name)] = af
+			cfg.AFSettings[afName] = make(map[types.ChannelName]*ClientChannelConfig)
+			for chNameStr, chValueNode := range chanMap {
+				chName := types.ChannelName(chNameStr)
+				chDt := dt.sub("address_families." + afNameStr + "." + chNameStr)
+				ch, err := overlayClientChannel(afName, chName, chValueNode, chDt)
+				if err != nil {
+					return nil, nil, fmt.Errorf("af %s channel %s: %w", afNameStr, chNameStr, err)
+				}
+				cfg.AFSettings[afName][chName] = ch
+			}
 		}
+	}
+
+	if err := validateClientUniqueness(cfg.AFSettings); err != nil {
+		return nil, nil, err
+	}
+
+	// Channel additional cost overlay (peer × af × isp)
+	if n, ok := m["channel_additional_costs"]; ok && n.Kind == yaml.SequenceNode {
+		var rules []ChannelAdditionalCost
+		if err := n.Decode(&rules); err != nil {
+			return nil, nil, fmt.Errorf("channel_additional_costs: %w", err)
+		}
+		for i := range rules {
+			if rules[i].Peer == "" {
+				rules[i].Peer = "*"
+			}
+			if rules[i].AF == "" {
+				rules[i].AF = "*"
+			}
+			if rules[i].ISP == "" {
+				rules[i].ISP = "*"
+			}
+		}
+		cfg.ChannelAdditionalCosts = rules
 	}
 
 	return cfg, dt.result(), nil
 }
 
-func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientAFConfig, error) {
-	afName := types.AFName(name)
-
-	// Clone matching default AF, or first available
-	var base *ClientAFConfig
-	if def, ok := DefaultClientConfig.AFSettings[afName]; ok {
-		base = cloneClientAFConfig(def)
-	} else {
-		for _, def := range DefaultClientConfig.AFSettings {
-			base = cloneClientAFConfig(def)
-			break
+// pickClientChannelDefault returns the best matching default template for (af, ch).
+// Lookup order: Defaults[af][ch] → Defaults[af][*any] → Defaults[*any][*any].
+func pickClientChannelDefault(af types.AFName, ch types.ChannelName) *ClientChannelConfig {
+	if chans, ok := DefaultClientConfig.AFSettings[af]; ok {
+		if def, ok := chans[ch]; ok {
+			return cloneClientChannelConfig(def)
+		}
+		for _, def := range chans {
+			return cloneClientChannelConfig(def)
 		}
 	}
-	if base == nil {
-		base = &ClientAFConfig{}
+	for _, chans := range DefaultClientConfig.AFSettings {
+		for _, def := range chans {
+			return cloneClientChannelConfig(def)
+		}
 	}
-	base.Name = afName
+	return &ClientChannelConfig{}
+}
+
+func overlayClientChannel(afName types.AFName, chName types.ChannelName, node *yaml.Node, dt *defaultTracker) (*ClientChannelConfig, error) {
+	base := pickClientChannelDefault(afName, chName)
+	base.AF = afName
+	base.Channel = chName
 	base.Controllers = nil
 
 	m := nodeMap(node)
@@ -218,8 +283,20 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 	if err := trackedSet(&base.ForwardCost, m, "forward_cost", dt); err != nil {
 		return nil, err
 	}
+	if err := trackedSet(&base.BindDevice, m, "bind_device", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.IspName, m, "isp_name", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.UpBwKbps, m, "up_bw_kbps", dt); err != nil {
+		return nil, err
+	}
+	if err := trackedSet(&base.DownBwKbps, m, "down_bw_kbps", dt); err != nil {
+		return nil, err
+	}
 
-	// bind_addr vs autoip_interface (tracked via dt for bind_addr default)
+	// bind_addr vs autoip_interface
 	bindStr, _ := nodeString(m, "bind_addr")
 	autoIP, _ := nodeString(m, "autoip_interface")
 	hasBind := bindStr != ""
@@ -238,7 +315,7 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 	} else if hasAutoIP {
 		base.AutoIPInterface = autoIP
 		addrSelectStr, _ := nodeString(m, "addr_select")
-		script, err := resolveAddrSelect(addrSelectStr, name)
+		script, err := resolveAddrSelect(addrSelectStr, string(afName))
 		if err != nil {
 			return nil, err
 		}
@@ -273,6 +350,46 @@ func overlayClientAF(name string, node *yaml.Node, dt *defaultTracker) (*ClientA
 	return base, nil
 }
 
+// validateClientUniqueness enforces:
+//   - within an AF: bind_addr/autoip_interface unique across channels
+//   - across all AFs+channels: vxlan_name unique
+func validateClientUniqueness(afs map[types.AFName]map[types.ChannelName]*ClientChannelConfig) error {
+	vxlanNames := make(map[string]string) // vxlan_name -> "af/channel" of first occurrence
+	for af, chans := range afs {
+		bindSeen := make(map[string]types.ChannelName)
+		autoSeen := make(map[string]types.ChannelName)
+		for ch, cc := range chans {
+			if cc.BindAddr.IsValid() {
+				key := cc.BindAddr.String()
+				if prev, ok := bindSeen[key]; ok {
+					return fmt.Errorf("af %s: bind_addr %s duplicated in channels %s and %s",
+						af, key, prev, ch)
+				}
+				bindSeen[key] = ch
+			}
+			if cc.AutoIPInterface != "" {
+				if prev, ok := autoSeen[cc.AutoIPInterface]; ok {
+					return fmt.Errorf("af %s: autoip_interface %s duplicated in channels %s and %s",
+						af, cc.AutoIPInterface, prev, ch)
+				}
+				autoSeen[cc.AutoIPInterface] = ch
+			}
+			if cc.VxlanName != "" {
+				loc := fmt.Sprintf("%s/%s", af, ch)
+				if len(cc.VxlanName) > 15 {
+					return fmt.Errorf("vxlan_name %q (%d chars) exceeds Linux IFNAMSIZ-1 (15) at %s; shorten vxlan_name_prefix or channel name",
+						cc.VxlanName, len(cc.VxlanName), loc)
+				}
+				if prev, ok := vxlanNames[cc.VxlanName]; ok {
+					return fmt.Errorf("vxlan_name %q duplicated: %s and %s", cc.VxlanName, prev, loc)
+				}
+				vxlanNames[cc.VxlanName] = loc
+			}
+		}
+	}
+	return nil
+}
+
 func cloneClientConfig(src *ClientConfig) *ClientConfig {
 	dst := *src
 	if src.NTPServers != nil {
@@ -280,15 +397,19 @@ func cloneClientConfig(src *ClientConfig) *ClientConfig {
 		copy(dst.NTPServers, src.NTPServers)
 	}
 	if src.AFSettings != nil {
-		dst.AFSettings = make(map[types.AFName]*ClientAFConfig, len(src.AFSettings))
-		for k, v := range src.AFSettings {
-			dst.AFSettings[k] = cloneClientAFConfig(v)
+		dst.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig, len(src.AFSettings))
+		for af, chans := range src.AFSettings {
+			inner := make(map[types.ChannelName]*ClientChannelConfig, len(chans))
+			for ch, v := range chans {
+				inner[ch] = cloneClientChannelConfig(v)
+			}
+			dst.AFSettings[af] = inner
 		}
 	}
 	return &dst
 }
 
-func cloneClientAFConfig(src *ClientAFConfig) *ClientAFConfig {
+func cloneClientChannelConfig(src *ClientChannelConfig) *ClientChannelConfig {
 	dst := *src
 	if src.Controllers != nil {
 		dst.Controllers = make([]ControllerEndpoint, len(src.Controllers))

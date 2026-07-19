@@ -124,10 +124,10 @@ run_test "rogue -> node-4 ICMP (control plane unaffected)" \
 # --- Section 4: Injection test — firewall OFF (node-4) ---
 echo ""
 echo "  === Injection test: firewall OFF (node-4) ==="
-rx_before=$(get_vxlan_rx "node-4" "vxlan-v4")
+rx_before=$(get_vxlan_rx "node-4" "vxlan-v4-ISP1")
 send_vxlan_inject "${V4_SUBNET}.4" "$VNI"
 sleep 0.5
-rx_after=$(get_vxlan_rx "node-4" "vxlan-v4")
+rx_after=$(get_vxlan_rx "node-4" "vxlan-v4-ISP1")
 
 test_total=$((test_total + 1))
 echo -n "  TEST: rogue VXLAN inject to node-4 (no firewall) reaches vxlan device ... "
@@ -142,14 +142,14 @@ fi
 # --- Section 5: Injection test — firewall ON (node-2) ---
 echo ""
 echo "  === Injection test: firewall ON (node-2) ==="
-rx_before=$(get_vxlan_rx "node-2" "vxlan-v4")
+rx_before=$(get_vxlan_rx "node-2" "vxlan-v4-ISP1")
 drops_before=$(ip netns exec "node-2" nft list table inet vxlan_fw 2>/dev/null \
     | grep -oP 'counter packets \K[0-9]+' | head -1 || echo 0)
 
 send_vxlan_inject "${V4_SUBNET}.2" "$VNI"
 sleep 0.5
 
-rx_after=$(get_vxlan_rx "node-2" "vxlan-v4")
+rx_after=$(get_vxlan_rx "node-2" "vxlan-v4-ISP1")
 drops_after=$(ip netns exec "node-2" nft list table inet vxlan_fw 2>/dev/null \
     | grep -oP 'counter packets \K[0-9]+' | head -1 || echo 0)
 
@@ -187,7 +187,8 @@ run_test "leaf-1 -> leaf-3 (after IP change, with firewall)" \
     ip netns exec "leaf-1" ping -c 3 -W 10 "${LEAF_SUBNET_V4}.3"
 
 # Verify new IP in firewall allowed set on node-2
-new_ip_in_fw=$(ip netns exec "node-2" nft list set inet vxlan_fw af_v4 2>/dev/null | grep -c "101" || echo 0)
+new_ip_in_fw=$(ip netns exec "node-2" nft list set inet vxlan_fw af_v4__ISP1 2>/dev/null | grep -c "101")
+new_ip_in_fw=${new_ip_in_fw:-0}
 test_total=$((test_total + 1))
 echo -n "  TEST: new IP ${V4_SUBNET}.101 in node-2 firewall set ... "
 if [ "$new_ip_in_fw" -gt 0 ]; then
@@ -196,13 +197,13 @@ if [ "$new_ip_in_fw" -gt 0 ]; then
 else
     echo "FAIL"
     test_fail=$((test_fail + 1))
-    ip netns exec "node-2" nft list set inet vxlan_fw af_v4 2>&1
+    ip netns exec "node-2" nft list set inet vxlan_fw af_v4__ISP1 2>&1
 fi
 
 # --- Section 8: Per-AF set isolation ---
 echo "  Checking per-AF set isolation on node-3 (dual-stack)..."
-v4_set=$(ip netns exec "node-3" nft list set inet vxlan_fw af_v4 2>/dev/null || echo "")
-v6_set=$(ip netns exec "node-3" nft list set inet vxlan_fw af_v6 2>/dev/null || echo "")
+v4_set=$(ip netns exec "node-3" nft list set inet vxlan_fw af_v4__ISP1 2>/dev/null || echo "")
+v6_set=$(ip netns exec "node-3" nft list set inet vxlan_fw af_v6__ISP1 2>/dev/null || echo "")
 
 test_total=$((test_total + 1))
 echo -n "  TEST: node-3 has separate v4 and v6 firewall sets ... "

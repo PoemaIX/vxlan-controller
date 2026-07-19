@@ -681,6 +681,12 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     return 'lat-bad';
   }
 
+  function afChanLabel(af, ch) {
+    if (!af) return '';
+    if (ch) return af + '/' + ch;
+    return af;
+  }
+
   function getLatencyEntry(srcId, dstId) {
     if (!state?.latency_matrix) return null;
     for (const row of state.latency_matrix) {
@@ -784,11 +790,11 @@ tr:hover td { background: rgba(59,158,255,0.03); }
             const fwd = getLatencyEntry(sorted[0], sorted[1]);
             const rev = getLatencyEntry(sorted[1], sorted[0]);
             links.push({
-              src: nodeMap[sorted[0]], dst: nodeMap[sorted[1]], af: e.af,
+              src: nodeMap[sorted[0]], dst: nodeMap[sorted[1]],
               latFwd: fwd ? fwd.latency : null,
               latRev: rev ? rev.latency : null,
-              afFwd: fwd ? fwd.af : '',
-              afRev: rev ? rev.af : '',
+              labelFwd: fwd ? afChanLabel(fwd.af, fwd.channel) : '',
+              labelRev: rev ? afChanLabel(rev.af, rev.channel) : '',
             });
           }
         });
@@ -846,7 +852,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       // Always show both directions as normal
       if (fwdOk) {
         const isSPTDir = fwdInSPT;
-        const afPart = l.afFwd ? l.afFwd + ' ' : '';
+        const afPart = l.labelFwd ? l.labelFwd + ' ' : '';
         const txt = afPart + l.latFwd.toFixed(1) + ' ms';
         const tw = txt.length * 5.2 + 8;
         html += '<rect class="topo-link-label-bg" x="'+(x1+ox-tw/2)+'" y="'+(y1+oy-7)+'" width="'+tw+'" height="14"/>';
@@ -854,7 +860,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       }
       if (revOk) {
         const isSPTDir = revInSPT;
-        const afPart = l.afRev ? l.afRev + ' ' : '';
+        const afPart = l.labelRev ? l.labelRev + ' ' : '';
         const txt = afPart + l.latRev.toFixed(1) + ' ms';
         const tw = txt.length * 5.2 + 8;
         html += '<rect class="topo-link-label-bg" x="'+(x2+ox-tw/2)+'" y="'+(y2+oy-7)+'" width="'+tw+'" height="14"/>';
@@ -969,7 +975,8 @@ tr:hover td { background: rgba(59,158,255,0.03); }
         } else {
           const e = latMap[src.id+'|'+dst.id];
           if (e && e.latency != null && e.latency < 1e15) {
-            const afPart = e.af ? '<span style="color:var(--text3);margin-right:4px">'+e.af+'</span>' : '';
+            const label = afChanLabel(e.af, e.channel);
+            const afPart = label ? '<span style="color:var(--text3);margin-right:4px">'+label+'</span>' : '';
             h += '<td class="lat-cell '+latClass(e.latency)+'">'+afPart+'<span>'+e.latency.toFixed(1)+'</span></td>';
           } else {
             h += '<td class="lat-cell" style="color:var(--text3)">?</td>';
@@ -991,12 +998,12 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       return;
     }
 
-    // Build next-hop lookup: nhMap[src][dst] = {next_hop, af}
+    // Build next-hop lookup: nhMap[src][dst] = {next_hop, af, channel}
     const nhMap = {};
     (state.route_matrix||[]).forEach(row => {
       if (!nhMap[row.src]) nhMap[row.src] = {};
       (row.entries||[]).forEach(e => {
-        nhMap[row.src][e.dst] = { next_hop: e.next_hop, af: e.af };
+        nhMap[row.src][e.dst] = { next_hop: e.next_hop, af: e.af, channel: e.channel };
       });
     });
 

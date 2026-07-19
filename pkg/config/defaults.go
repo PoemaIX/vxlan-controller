@@ -37,10 +37,12 @@ func DefaultClientConfigYAML() ([]byte, error) {
 	priv, pub := crypto.GenerateKeyPair()
 	cfg.PrivateKey = priv
 
-	// Add placeholder controllers for the generated YAML
-	for _, af := range cfg.AFSettings {
-		af.Controllers = []ControllerEndpoint{
-			{PubKey: pub, Addr: placeholderAddrPort(af.BindAddr)},
+	// Add placeholder controllers for each channel of each AF.
+	for _, channels := range cfg.AFSettings {
+		for _, ch := range channels {
+			ch.Controllers = []ControllerEndpoint{
+				{PubKey: pub, Addr: placeholderAddrPort(ch.BindAddr)},
+			}
 		}
 	}
 
@@ -103,32 +105,36 @@ var DefaultClientConfig = ClientConfig{
 	NTPRTTThreshold:    50 * time.Millisecond,
 	SyncCheckMaxDelay:  20,
 	SyncCheckInterval:  60 * time.Second,
-	AFSettings: map[types.AFName]*ClientAFConfig{
+	AFSettings: map[types.AFName]map[types.ChannelName]*ClientChannelConfig{
 		"v4": {
-			Enable:            true,
-			BindAddr:          netip.MustParseAddr("0.0.0.0"),
-			ProbePort:         4790,
-			VxlanName:         "vxlan-v4",
-			VxlanVNI:          100,
-			VxlanMTU:          1400,
-			VxlanDstPort:      4789,
-			VxlanSrcPortStart: 4789,
-			VxlanSrcPortEnd:   4790,
-			Priority:          10,
-			ForwardCost:       20,
+			types.DefaultChannelName: {
+				Enable:            true,
+				BindAddr:          netip.MustParseAddr("0.0.0.0"),
+				ProbePort:         4790,
+				VxlanName:         "vxlan-v4",
+				VxlanVNI:          100,
+				VxlanMTU:          1400,
+				VxlanDstPort:      4789,
+				VxlanSrcPortStart: 4789,
+				VxlanSrcPortEnd:   4790,
+				Priority:          10,
+				ForwardCost:       20,
+			},
 		},
 		"v6": {
-			Enable:            false,
-			BindAddr:          netip.MustParseAddr("::"),
-			ProbePort:         4790,
-			VxlanName:         "vxlan-v6",
-			VxlanVNI:          100,
-			VxlanMTU:          1400,
-			VxlanDstPort:      4789,
-			VxlanSrcPortStart: 4789,
-			VxlanSrcPortEnd:   4790,
-			Priority:          10,
-			ForwardCost:       20,
+			types.DefaultChannelName: {
+				Enable:            false,
+				BindAddr:          netip.MustParseAddr("::"),
+				ProbePort:         4790,
+				VxlanName:         "vxlan-v6",
+				VxlanVNI:          100,
+				VxlanMTU:          1400,
+				VxlanDstPort:      4789,
+				VxlanSrcPortStart: 4789,
+				VxlanSrcPortEnd:   4790,
+				Priority:          10,
+				ForwardCost:       20,
+			},
 		},
 	},
 }
@@ -146,24 +152,28 @@ var DefaultControllerConfig = ControllerConfig{
 		InProbeIntervalMs: 200,
 		ProbeTimeoutMs:    1000,
 	},
-	AFSettings: map[types.AFName]*ControllerAFConfig{
+	AFSettings: map[types.AFName]map[types.ChannelName]*ControllerChannelConfig{
 		"v4": {
-			Enable:            true,
-			BindAddr:          netip.MustParseAddr("0.0.0.0"),
-			CommunicationPort: 5000,
-			VxlanVNI:          100,
-			VxlanDstPort:      4789,
-			VxlanSrcPortStart: 4789,
-			VxlanSrcPortEnd:   4789,
+			types.DefaultChannelName: {
+				Enable:            true,
+				BindAddr:          netip.MustParseAddr("0.0.0.0"),
+				CommunicationPort: 5000,
+				VxlanVNI:          100,
+				VxlanDstPort:      4789,
+				VxlanSrcPortStart: 4789,
+				VxlanSrcPortEnd:   4789,
+			},
 		},
 		"v6": {
-			Enable:            false,
-			BindAddr:          netip.MustParseAddr("::"),
-			CommunicationPort: 5000,
-			VxlanVNI:          100,
-			VxlanDstPort:      4789,
-			VxlanSrcPortStart: 4789,
-			VxlanSrcPortEnd:   4789,
+			types.DefaultChannelName: {
+				Enable:            false,
+				BindAddr:          netip.MustParseAddr("::"),
+				CommunicationPort: 5000,
+				VxlanVNI:          100,
+				VxlanDstPort:      4789,
+				VxlanSrcPortStart: 4789,
+				VxlanSrcPortEnd:   4789,
+			},
 		},
 	},
 }

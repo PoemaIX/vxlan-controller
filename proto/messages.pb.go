@@ -23,9 +23,14 @@ const (
 
 // Client → Controller
 type ClientRegister struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClientId      []byte                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`                                                                                    // 32 bytes pubkey
-	AfEndpoints   map[string]*AFEndpoint `protobuf:"bytes,2,rep,name=af_endpoints,json=afEndpoints,proto3" json:"af_endpoints,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // key = af_name
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ClientId []byte                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"` // 32 bytes pubkey
+	// Channel identity of THIS TCP connection. Controller uses (af_name, channel_name)
+	// to decide which existing (af, channel) slot to replace.
+	AfName      string `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName string `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
+	// Full list of this client's (af, channel) endpoints so peers know how to reach them.
+	Endpoints     []*AFEndpoint `protobuf:"bytes,2,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -67,17 +72,40 @@ func (x *ClientRegister) GetClientId() []byte {
 	return nil
 }
 
-func (x *ClientRegister) GetAfEndpoints() map[string]*AFEndpoint {
+func (x *ClientRegister) GetAfName() string {
 	if x != nil {
-		return x.AfEndpoints
+		return x.AfName
+	}
+	return ""
+}
+
+func (x *ClientRegister) GetChannelName() string {
+	if x != nil {
+		return x.ChannelName
+	}
+	return ""
+}
+
+func (x *ClientRegister) GetEndpoints() []*AFEndpoint {
+	if x != nil {
+		return x.Endpoints
 	}
 	return nil
 }
 
 type AFEndpoint struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ProbePort     uint32                 `protobuf:"varint,1,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"`
-	VxlanDstPort  uint32                 `protobuf:"varint,2,opt,name=vxlan_dst_port,json=vxlanDstPort,proto3" json:"vxlan_dst_port,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	AfName       string                 `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName  string                 `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
+	ProbePort    uint32                 `protobuf:"varint,1,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"`
+	VxlanDstPort uint32                 `protobuf:"varint,2,opt,name=vxlan_dst_port,json=vxlanDstPort,proto3" json:"vxlan_dst_port,omitempty"`
+	// Optional ISP label for this channel — used by peers to match
+	// ChannelAdditionalCost rules. Empty defaults to the channel_name.
+	IspName string `protobuf:"bytes,5,opt,name=isp_name,json=ispName,proto3" json:"isp_name,omitempty"`
+	// Optional advertised bandwidth in kbit/s. 0 = unset (treated as
+	// "unknown/unlimited" by the rate-limit calculation).
+	UpBwKbps      uint64 `protobuf:"varint,6,opt,name=up_bw_kbps,json=upBwKbps,proto3" json:"up_bw_kbps,omitempty"`
+	DownBwKbps    uint64 `protobuf:"varint,7,opt,name=down_bw_kbps,json=downBwKbps,proto3" json:"down_bw_kbps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -112,6 +140,20 @@ func (*AFEndpoint) Descriptor() ([]byte, []int) {
 	return file_proto_messages_proto_rawDescGZIP(), []int{1}
 }
 
+func (x *AFEndpoint) GetAfName() string {
+	if x != nil {
+		return x.AfName
+	}
+	return ""
+}
+
+func (x *AFEndpoint) GetChannelName() string {
+	if x != nil {
+		return x.ChannelName
+	}
+	return ""
+}
+
 func (x *AFEndpoint) GetProbePort() uint32 {
 	if x != nil {
 		return x.ProbePort
@@ -122,6 +164,27 @@ func (x *AFEndpoint) GetProbePort() uint32 {
 func (x *AFEndpoint) GetVxlanDstPort() uint32 {
 	if x != nil {
 		return x.VxlanDstPort
+	}
+	return 0
+}
+
+func (x *AFEndpoint) GetIspName() string {
+	if x != nil {
+		return x.IspName
+	}
+	return ""
+}
+
+func (x *AFEndpoint) GetUpBwKbps() uint64 {
+	if x != nil {
+		return x.UpBwKbps
+	}
+	return 0
+}
+
+func (x *AFEndpoint) GetDownBwKbps() uint64 {
+	if x != nil {
+		return x.DownBwKbps
 	}
 	return 0
 }
@@ -345,13 +408,13 @@ func (x *ControllerState) GetControllerId() []byte {
 }
 
 type ClientInfoProto struct {
-	state          protoimpl.MessageState    `protogen:"open.v1"`
-	ClientId       []byte                    `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	Endpoints      map[string]*EndpointProto `protobuf:"bytes,2,rep,name=endpoints,proto3" json:"endpoints,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // key = af_name
-	LastSeen       int64                     `protobuf:"varint,3,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
-	Routes         []*Type2Route             `protobuf:"bytes,4,rep,name=routes,proto3" json:"routes,omitempty"`
-	AdditionalCost float64                   `protobuf:"fixed64,5,opt,name=additional_cost,json=additionalCost,proto3" json:"additional_cost,omitempty"` // deprecated, kept for wire compat
-	ClientName     string                    `protobuf:"bytes,6,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ClientId       []byte                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	Endpoints      []*EndpointProto       `protobuf:"bytes,2,rep,name=endpoints,proto3" json:"endpoints,omitempty"` // each carries (af_name, channel_name)
+	LastSeen       int64                  `protobuf:"varint,3,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	Routes         []*Type2Route          `protobuf:"bytes,4,rep,name=routes,proto3" json:"routes,omitempty"`
+	AdditionalCost float64                `protobuf:"fixed64,5,opt,name=additional_cost,json=additionalCost,proto3" json:"additional_cost,omitempty"` // deprecated, kept for wire compat
+	ClientName     string                 `protobuf:"bytes,6,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -393,7 +456,7 @@ func (x *ClientInfoProto) GetClientId() []byte {
 	return nil
 }
 
-func (x *ClientInfoProto) GetEndpoints() map[string]*EndpointProto {
+func (x *ClientInfoProto) GetEndpoints() []*EndpointProto {
 	if x != nil {
 		return x.Endpoints
 	}
@@ -430,9 +493,14 @@ func (x *ClientInfoProto) GetClientName() string {
 
 type EndpointProto struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	AfName        string                 `protobuf:"bytes,4,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName   string                 `protobuf:"bytes,5,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
 	Ip            []byte                 `protobuf:"bytes,1,opt,name=ip,proto3" json:"ip,omitempty"` // 4 or 16 bytes
 	ProbePort     uint32                 `protobuf:"varint,2,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"`
 	VxlanDstPort  uint32                 `protobuf:"varint,3,opt,name=vxlan_dst_port,json=vxlanDstPort,proto3" json:"vxlan_dst_port,omitempty"`
+	IspName       string                 `protobuf:"bytes,6,opt,name=isp_name,json=ispName,proto3" json:"isp_name,omitempty"`
+	UpBwKbps      uint64                 `protobuf:"varint,7,opt,name=up_bw_kbps,json=upBwKbps,proto3" json:"up_bw_kbps,omitempty"`
+	DownBwKbps    uint64                 `protobuf:"varint,8,opt,name=down_bw_kbps,json=downBwKbps,proto3" json:"down_bw_kbps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -467,6 +535,20 @@ func (*EndpointProto) Descriptor() ([]byte, []int) {
 	return file_proto_messages_proto_rawDescGZIP(), []int{6}
 }
 
+func (x *EndpointProto) GetAfName() string {
+	if x != nil {
+		return x.AfName
+	}
+	return ""
+}
+
+func (x *EndpointProto) GetChannelName() string {
+	if x != nil {
+		return x.ChannelName
+	}
+	return ""
+}
+
 func (x *EndpointProto) GetIp() []byte {
 	if x != nil {
 		return x.Ip
@@ -484,6 +566,27 @@ func (x *EndpointProto) GetProbePort() uint32 {
 func (x *EndpointProto) GetVxlanDstPort() uint32 {
 	if x != nil {
 		return x.VxlanDstPort
+	}
+	return 0
+}
+
+func (x *EndpointProto) GetIspName() string {
+	if x != nil {
+		return x.IspName
+	}
+	return ""
+}
+
+func (x *EndpointProto) GetUpBwKbps() uint64 {
+	if x != nil {
+		return x.UpBwKbps
+	}
+	return 0
+}
+
+func (x *EndpointProto) GetDownBwKbps() uint64 {
+	if x != nil {
+		return x.DownBwKbps
 	}
 	return 0
 }
@@ -968,6 +1071,7 @@ type RouteMatrixCell struct {
 	DstClientId   []byte                 `protobuf:"bytes,1,opt,name=dst_client_id,json=dstClientId,proto3" json:"dst_client_id,omitempty"`
 	NexthopId     []byte                 `protobuf:"bytes,2,opt,name=nexthop_id,json=nexthopId,proto3" json:"nexthop_id,omitempty"`
 	AfName        string                 `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName   string                 `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1019,6 +1123,13 @@ func (x *RouteMatrixCell) GetNexthopId() []byte {
 func (x *RouteMatrixCell) GetAfName() string {
 	if x != nil {
 		return x.AfName
+	}
+	return ""
+}
+
+func (x *RouteMatrixCell) GetChannelName() string {
+	if x != nil {
+		return x.ChannelName
 	}
 	return ""
 }
@@ -1214,9 +1325,9 @@ func (x *ProbeResults) GetResults() map[string]*ProbeResultEntry {
 }
 
 type ProbeResultEntry struct {
-	state              protoimpl.MessageState    `protogen:"open.v1"`
-	AfResults          map[string]*AFProbeResult `protobuf:"bytes,1,rep,name=af_results,json=afResults,proto3" json:"af_results,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`                              // key = af_name
-	DebouncedAfResults map[string]*AFProbeResult `protobuf:"bytes,2,rep,name=debounced_af_results,json=debouncedAfResults,proto3" json:"debounced_af_results,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // key = af_name; smoothed over window
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	AfResults          []*AFProbeResult       `protobuf:"bytes,1,rep,name=af_results,json=afResults,proto3" json:"af_results,omitempty"`                              // each carries (af_name, channel_name)
+	DebouncedAfResults []*AFProbeResult       `protobuf:"bytes,2,rep,name=debounced_af_results,json=debouncedAfResults,proto3" json:"debounced_af_results,omitempty"` // smoothed over window
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -1251,14 +1362,14 @@ func (*ProbeResultEntry) Descriptor() ([]byte, []int) {
 	return file_proto_messages_proto_rawDescGZIP(), []int{19}
 }
 
-func (x *ProbeResultEntry) GetAfResults() map[string]*AFProbeResult {
+func (x *ProbeResultEntry) GetAfResults() []*AFProbeResult {
 	if x != nil {
 		return x.AfResults
 	}
 	return nil
 }
 
-func (x *ProbeResultEntry) GetDebouncedAfResults() map[string]*AFProbeResult {
+func (x *ProbeResultEntry) GetDebouncedAfResults() []*AFProbeResult {
 	if x != nil {
 		return x.DebouncedAfResults
 	}
@@ -1267,12 +1378,14 @@ func (x *ProbeResultEntry) GetDebouncedAfResults() map[string]*AFProbeResult {
 
 type AFProbeResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	AfName        string                 `protobuf:"bytes,9,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName   string                 `protobuf:"bytes,10,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
 	LatencyMean   float64                `protobuf:"fixed64,1,opt,name=latency_mean,json=latencyMean,proto3" json:"latency_mean,omitempty"`
 	LatencyStd    float64                `protobuf:"fixed64,2,opt,name=latency_std,json=latencyStd,proto3" json:"latency_std,omitempty"`
 	PacketLoss    float64                `protobuf:"fixed64,3,opt,name=packet_loss,json=packetLoss,proto3" json:"packet_loss,omitempty"`
 	Priority      int32                  `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
-	ForwardCost   float64                `protobuf:"fixed64,5,opt,name=forward_cost,json=forwardCost,proto3" json:"forward_cost,omitempty"` // cost of transiting through this node via this AF
-	SwitchCost    float64                `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`    // 0 for preferred AF, >0 for others (hysteresis)
+	ForwardCost   float64                `protobuf:"fixed64,5,opt,name=forward_cost,json=forwardCost,proto3" json:"forward_cost,omitempty"` // cost of transiting through this node via this (af, channel)
+	SwitchCost    float64                `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`    // 0 for preferred (af, channel), >0 for others (hysteresis)
 	FinalCost     float64                `protobuf:"fixed64,7,opt,name=final_cost,json=finalCost,proto3" json:"final_cost,omitempty"`       // quality_cost + forward_cost + switch_cost
 	QualityCost   float64                `protobuf:"fixed64,8,opt,name=quality_cost,json=qualityCost,proto3" json:"quality_cost,omitempty"` // abstract quality metric (currently = latency_mean)
 	unknownFields protoimpl.UnknownFields
@@ -1307,6 +1420,20 @@ func (x *AFProbeResult) ProtoReflect() protoreflect.Message {
 // Deprecated: Use AFProbeResult.ProtoReflect.Descriptor instead.
 func (*AFProbeResult) Descriptor() ([]byte, []int) {
 	return file_proto_messages_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *AFProbeResult) GetAfName() string {
+	if x != nil {
+		return x.AfName
+	}
+	return ""
+}
+
+func (x *AFProbeResult) GetChannelName() string {
+	if x != nil {
+		return x.ChannelName
+	}
+	return ""
 }
 
 func (x *AFProbeResult) GetLatencyMean() float64 {
@@ -1836,18 +1963,24 @@ var File_proto_messages_proto protoreflect.FileDescriptor
 
 const file_proto_messages_proto_rawDesc = "" +
 	"\n" +
-	"\x14proto/messages.proto\x12\x0fvxlancontroller\"\xdf\x01\n" +
+	"\x14proto/messages.proto\x12\x0fvxlancontroller\"\xa4\x01\n" +
 	"\x0eClientRegister\x12\x1b\n" +
-	"\tclient_id\x18\x01 \x01(\fR\bclientId\x12S\n" +
-	"\faf_endpoints\x18\x02 \x03(\v20.vxlancontroller.ClientRegister.AfEndpointsEntryR\vafEndpoints\x1a[\n" +
-	"\x10AfEndpointsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x121\n" +
-	"\x05value\x18\x02 \x01(\v2\x1b.vxlancontroller.AFEndpointR\x05value:\x028\x01\"Q\n" +
+	"\tclient_id\x18\x01 \x01(\fR\bclientId\x12\x17\n" +
+	"\aaf_name\x18\x03 \x01(\tR\x06afName\x12!\n" +
+	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\x129\n" +
+	"\tendpoints\x18\x02 \x03(\v2\x1b.vxlancontroller.AFEndpointR\tendpoints\"\xe8\x01\n" +
 	"\n" +
-	"AFEndpoint\x12\x1d\n" +
+	"AFEndpoint\x12\x17\n" +
+	"\aaf_name\x18\x03 \x01(\tR\x06afName\x12!\n" +
+	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\x12\x1d\n" +
 	"\n" +
 	"probe_port\x18\x01 \x01(\rR\tprobePort\x12$\n" +
-	"\x0evxlan_dst_port\x18\x02 \x01(\rR\fvxlanDstPort\"\x8e\x01\n" +
+	"\x0evxlan_dst_port\x18\x02 \x01(\rR\fvxlanDstPort\x12\x19\n" +
+	"\bisp_name\x18\x05 \x01(\tR\aispName\x12\x1c\n" +
+	"\n" +
+	"up_bw_kbps\x18\x06 \x01(\x04R\bupBwKbps\x12 \n" +
+	"\fdown_bw_kbps\x18\a \x01(\x04R\n" +
+	"downBwKbps\"\x8e\x01\n" +
 	"\tMACUpdate\x123\n" +
 	"\x06routes\x18\x01 \x03(\v2\x1b.vxlancontroller.Type2RouteR\x06routes\x12\x17\n" +
 	"\ais_full\x18\x02 \x01(\bR\x06isFull\x12\x1d\n" +
@@ -1869,23 +2002,27 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\rcontroller_id\x18\x06 \x01(\fR\fcontrollerId\x1a\\\n" +
 	"\fClientsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x126\n" +
-	"\x05value\x18\x02 \x01(\v2 .vxlancontroller.ClientInfoProtoR\x05value:\x028\x01\"\xf7\x02\n" +
+	"\x05value\x18\x02 \x01(\v2 .vxlancontroller.ClientInfoProtoR\x05value:\x028\x01\"\x88\x02\n" +
 	"\x0fClientInfoProto\x12\x1b\n" +
-	"\tclient_id\x18\x01 \x01(\fR\bclientId\x12M\n" +
-	"\tendpoints\x18\x02 \x03(\v2/.vxlancontroller.ClientInfoProto.EndpointsEntryR\tendpoints\x12\x1b\n" +
+	"\tclient_id\x18\x01 \x01(\fR\bclientId\x12<\n" +
+	"\tendpoints\x18\x02 \x03(\v2\x1e.vxlancontroller.EndpointProtoR\tendpoints\x12\x1b\n" +
 	"\tlast_seen\x18\x03 \x01(\x03R\blastSeen\x123\n" +
 	"\x06routes\x18\x04 \x03(\v2\x1b.vxlancontroller.Type2RouteR\x06routes\x12'\n" +
 	"\x0fadditional_cost\x18\x05 \x01(\x01R\x0eadditionalCost\x12\x1f\n" +
 	"\vclient_name\x18\x06 \x01(\tR\n" +
-	"clientName\x1a\\\n" +
-	"\x0eEndpointsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
-	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.EndpointProtoR\x05value:\x028\x01\"d\n" +
-	"\rEndpointProto\x12\x0e\n" +
+	"clientName\"\xfb\x01\n" +
+	"\rEndpointProto\x12\x17\n" +
+	"\aaf_name\x18\x04 \x01(\tR\x06afName\x12!\n" +
+	"\fchannel_name\x18\x05 \x01(\tR\vchannelName\x12\x0e\n" +
 	"\x02ip\x18\x01 \x01(\fR\x02ip\x12\x1d\n" +
 	"\n" +
 	"probe_port\x18\x02 \x01(\rR\tprobePort\x12$\n" +
-	"\x0evxlan_dst_port\x18\x03 \x01(\rR\fvxlanDstPort\"\xab\x04\n" +
+	"\x0evxlan_dst_port\x18\x03 \x01(\rR\fvxlanDstPort\x12\x19\n" +
+	"\bisp_name\x18\x06 \x01(\tR\aispName\x12\x1c\n" +
+	"\n" +
+	"up_bw_kbps\x18\a \x01(\x04R\bupBwKbps\x12 \n" +
+	"\fdown_bw_kbps\x18\b \x01(\x04R\n" +
+	"downBwKbps\"\xab\x04\n" +
 	"\x15ControllerStateUpdate\x12D\n" +
 	"\rclient_joined\x18\x01 \x01(\v2\x1d.vxlancontroller.ClientJoinedH\x00R\fclientJoined\x12>\n" +
 	"\vclient_left\x18\x02 \x01(\v2\x1b.vxlancontroller.ClientLeftH\x00R\n" +
@@ -1914,12 +2051,13 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\x04rows\x18\x01 \x03(\v2\x1f.vxlancontroller.RouteMatrixRowR\x04rows\"l\n" +
 	"\x0eRouteMatrixRow\x12\"\n" +
 	"\rsrc_client_id\x18\x01 \x01(\fR\vsrcClientId\x126\n" +
-	"\x05cells\x18\x02 \x03(\v2 .vxlancontroller.RouteMatrixCellR\x05cells\"m\n" +
+	"\x05cells\x18\x02 \x03(\v2 .vxlancontroller.RouteMatrixCellR\x05cells\"\x90\x01\n" +
 	"\x0fRouteMatrixCell\x12\"\n" +
 	"\rdst_client_id\x18\x01 \x01(\fR\vdstClientId\x12\x1d\n" +
 	"\n" +
 	"nexthop_id\x18\x02 \x01(\fR\tnexthopId\x12\x17\n" +
-	"\aaf_name\x18\x03 \x01(\tR\x06afName\"\xbe\x01\n" +
+	"\aaf_name\x18\x03 \x01(\tR\x06afName\x12!\n" +
+	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\"\xbe\x01\n" +
 	"\x14RouteTableEntryProto\x12\x10\n" +
 	"\x03mac\x18\x01 \x01(\fR\x03mac\x12\x0e\n" +
 	"\x02ip\x18\x02 \x01(\fR\x02ip\x12I\n" +
@@ -1939,18 +2077,15 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\aresults\x18\x03 \x03(\v2*.vxlancontroller.ProbeResults.ResultsEntryR\aresults\x1a]\n" +
 	"\fResultsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x127\n" +
-	"\x05value\x18\x02 \x01(\v2!.vxlancontroller.ProbeResultEntryR\x05value:\x028\x01\"\x95\x03\n" +
-	"\x10ProbeResultEntry\x12O\n" +
+	"\x05value\x18\x02 \x01(\v2!.vxlancontroller.ProbeResultEntryR\x05value:\x028\x01\"\xa3\x01\n" +
+	"\x10ProbeResultEntry\x12=\n" +
 	"\n" +
-	"af_results\x18\x01 \x03(\v20.vxlancontroller.ProbeResultEntry.AfResultsEntryR\tafResults\x12k\n" +
-	"\x14debounced_af_results\x18\x02 \x03(\v29.vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntryR\x12debouncedAfResults\x1a\\\n" +
-	"\x0eAfResultsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
-	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\x1ae\n" +
-	"\x17DebouncedAfResultsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x124\n" +
-	"\x05value\x18\x02 \x01(\v2\x1e.vxlancontroller.AFProbeResultR\x05value:\x028\x01\"\x96\x02\n" +
-	"\rAFProbeResult\x12!\n" +
+	"af_results\x18\x01 \x03(\v2\x1e.vxlancontroller.AFProbeResultR\tafResults\x12P\n" +
+	"\x14debounced_af_results\x18\x02 \x03(\v2\x1e.vxlancontroller.AFProbeResultR\x12debouncedAfResults\"\xd2\x02\n" +
+	"\rAFProbeResult\x12\x17\n" +
+	"\aaf_name\x18\t \x01(\tR\x06afName\x12!\n" +
+	"\fchannel_name\x18\n" +
+	" \x01(\tR\vchannelName\x12!\n" +
 	"\flatency_mean\x18\x01 \x01(\x01R\vlatencyMean\x12\x1f\n" +
 	"\vlatency_std\x18\x02 \x01(\x01R\n" +
 	"latencyStd\x12\x1f\n" +
@@ -2010,7 +2145,7 @@ func file_proto_messages_proto_rawDescGZIP() []byte {
 	return file_proto_messages_proto_rawDescData
 }
 
-var file_proto_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
+var file_proto_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_proto_messages_proto_goTypes = []any{
 	(*ClientRegister)(nil),         // 0: vxlancontroller.ClientRegister
 	(*AFEndpoint)(nil),             // 1: vxlancontroller.AFEndpoint
@@ -2041,21 +2176,17 @@ var file_proto_messages_proto_goTypes = []any{
 	(*McastRejectDetail)(nil),      // 26: vxlancontroller.McastRejectDetail
 	(*MulticastForward)(nil),       // 27: vxlancontroller.MulticastForward
 	(*MulticastDeliver)(nil),       // 28: vxlancontroller.MulticastDeliver
-	nil,                            // 29: vxlancontroller.ClientRegister.AfEndpointsEntry
-	nil,                            // 30: vxlancontroller.ControllerState.ClientsEntry
-	nil,                            // 31: vxlancontroller.ClientInfoProto.EndpointsEntry
-	nil,                            // 32: vxlancontroller.RouteTableEntryProto.OwnersEntry
-	nil,                            // 33: vxlancontroller.ProbeResults.ResultsEntry
-	nil,                            // 34: vxlancontroller.ProbeResultEntry.AfResultsEntry
-	nil,                            // 35: vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntry
+	nil,                            // 29: vxlancontroller.ControllerState.ClientsEntry
+	nil,                            // 30: vxlancontroller.RouteTableEntryProto.OwnersEntry
+	nil,                            // 31: vxlancontroller.ProbeResults.ResultsEntry
 }
 var file_proto_messages_proto_depIdxs = []int32{
-	29, // 0: vxlancontroller.ClientRegister.af_endpoints:type_name -> vxlancontroller.ClientRegister.AfEndpointsEntry
+	1,  // 0: vxlancontroller.ClientRegister.endpoints:type_name -> vxlancontroller.AFEndpoint
 	3,  // 1: vxlancontroller.MACUpdate.routes:type_name -> vxlancontroller.Type2Route
-	30, // 2: vxlancontroller.ControllerState.clients:type_name -> vxlancontroller.ControllerState.ClientsEntry
+	29, // 2: vxlancontroller.ControllerState.clients:type_name -> vxlancontroller.ControllerState.ClientsEntry
 	13, // 3: vxlancontroller.ControllerState.route_matrix:type_name -> vxlancontroller.RouteMatrixProto
 	16, // 4: vxlancontroller.ControllerState.route_table:type_name -> vxlancontroller.RouteTableEntryProto
-	31, // 5: vxlancontroller.ClientInfoProto.endpoints:type_name -> vxlancontroller.ClientInfoProto.EndpointsEntry
+	6,  // 5: vxlancontroller.ClientInfoProto.endpoints:type_name -> vxlancontroller.EndpointProto
 	3,  // 6: vxlancontroller.ClientInfoProto.routes:type_name -> vxlancontroller.Type2Route
 	8,  // 7: vxlancontroller.ControllerStateUpdate.client_joined:type_name -> vxlancontroller.ClientJoined
 	9,  // 8: vxlancontroller.ControllerStateUpdate.client_left:type_name -> vxlancontroller.ClientLeft
@@ -2068,24 +2199,20 @@ var file_proto_messages_proto_depIdxs = []int32{
 	5,  // 15: vxlancontroller.ClientInfoUpdateProto.client_info:type_name -> vxlancontroller.ClientInfoProto
 	14, // 16: vxlancontroller.RouteMatrixProto.rows:type_name -> vxlancontroller.RouteMatrixRow
 	15, // 17: vxlancontroller.RouteMatrixRow.cells:type_name -> vxlancontroller.RouteMatrixCell
-	32, // 18: vxlancontroller.RouteTableEntryProto.owners:type_name -> vxlancontroller.RouteTableEntryProto.OwnersEntry
-	33, // 19: vxlancontroller.ProbeResults.results:type_name -> vxlancontroller.ProbeResults.ResultsEntry
-	34, // 20: vxlancontroller.ProbeResultEntry.af_results:type_name -> vxlancontroller.ProbeResultEntry.AfResultsEntry
-	35, // 21: vxlancontroller.ProbeResultEntry.debounced_af_results:type_name -> vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntry
+	30, // 18: vxlancontroller.RouteTableEntryProto.owners:type_name -> vxlancontroller.RouteTableEntryProto.OwnersEntry
+	31, // 19: vxlancontroller.ProbeResults.results:type_name -> vxlancontroller.ProbeResults.ResultsEntry
+	20, // 20: vxlancontroller.ProbeResultEntry.af_results:type_name -> vxlancontroller.AFProbeResult
+	20, // 21: vxlancontroller.ProbeResultEntry.debounced_af_results:type_name -> vxlancontroller.AFProbeResult
 	24, // 22: vxlancontroller.McastStatsReport.mac_stats:type_name -> vxlancontroller.MACMcastStats
 	25, // 23: vxlancontroller.MACMcastStats.reject_reasons:type_name -> vxlancontroller.McastRejectReason
 	26, // 24: vxlancontroller.McastRejectReason.details:type_name -> vxlancontroller.McastRejectDetail
-	1,  // 25: vxlancontroller.ClientRegister.AfEndpointsEntry.value:type_name -> vxlancontroller.AFEndpoint
-	5,  // 26: vxlancontroller.ControllerState.ClientsEntry.value:type_name -> vxlancontroller.ClientInfoProto
-	6,  // 27: vxlancontroller.ClientInfoProto.EndpointsEntry.value:type_name -> vxlancontroller.EndpointProto
-	19, // 28: vxlancontroller.ProbeResults.ResultsEntry.value:type_name -> vxlancontroller.ProbeResultEntry
-	20, // 29: vxlancontroller.ProbeResultEntry.AfResultsEntry.value:type_name -> vxlancontroller.AFProbeResult
-	20, // 30: vxlancontroller.ProbeResultEntry.DebouncedAfResultsEntry.value:type_name -> vxlancontroller.AFProbeResult
-	31, // [31:31] is the sub-list for method output_type
-	31, // [31:31] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	5,  // 25: vxlancontroller.ControllerState.ClientsEntry.value:type_name -> vxlancontroller.ClientInfoProto
+	19, // 26: vxlancontroller.ProbeResults.ResultsEntry.value:type_name -> vxlancontroller.ProbeResultEntry
+	27, // [27:27] is the sub-list for method output_type
+	27, // [27:27] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_proto_messages_proto_init() }
@@ -2106,7 +2233,7 @@ func file_proto_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_messages_proto_rawDesc), len(file_proto_messages_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   36,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

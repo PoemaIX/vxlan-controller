@@ -37,24 +37,24 @@ run_test "leaf-6(v6) -> leaf-2(v4)" \
 # Verify FDB uses correct vxlan devices
 echo ""
 echo "  Checking FDB device assignment..."
-# On node-1 (v4-only): all remote MACs should use vxlan-v4
-n1_v6=$(ip netns exec "node-1" bridge fdb show dev vxlan-v6 2>/dev/null | grep -c "dst" || echo 0)
+# On node-1 (v4-only): all remote MACs should use vxlan-v4-ISP1
+n1_v6=$(ip netns exec "node-1" bridge fdb show dev vxlan-v6-ISP1 2>/dev/null | grep -c "dst" || echo 0)
 if [ "$n1_v6" = "0" ]; then
-    echo "    OK: node-1 (v4-only) uses only vxlan-v4"
+    echo "    OK: node-1 (v4-only) uses only vxlan-v4-ISP1"
 else
-    echo "    INFO: node-1 has $n1_v6 entries on vxlan-v6"
+    echo "    INFO: node-1 has $n1_v6 entries on vxlan-v6-ISP1"
 fi
-# On node-5 (v6-only): all remote MACs should use vxlan-v6
-n5_v4=$(ip netns exec "node-5" bridge fdb show dev vxlan-v4 2>/dev/null | grep -c "dst" || echo 0)
+# On node-5 (v6-only): all remote MACs should use vxlan-v6-ISP1
+n5_v4=$(ip netns exec "node-5" bridge fdb show dev vxlan-v4-ISP1 2>/dev/null | grep -c "dst" || echo 0)
 if [ "$n5_v4" = "0" ]; then
-    echo "    OK: node-5 (v6-only) uses only vxlan-v6"
+    echo "    OK: node-5 (v6-only) uses only vxlan-v6-ISP1"
 else
-    echo "    INFO: node-5 has $n5_v4 entries on vxlan-v4"
+    echo "    INFO: node-5 has $n5_v4 entries on vxlan-v4-ISP1"
 fi
 # On node-3 (dual-stack): should have entries on both vxlan devices
-n3_v4=$(ip netns exec "node-3" bridge fdb show dev vxlan-v4 2>/dev/null | grep -c "dst" || echo 0)
-n3_v6=$(ip netns exec "node-3" bridge fdb show dev vxlan-v6 2>/dev/null | grep -c "dst" || echo 0)
-echo "    node-3 (dual-stack): vxlan-v4=$n3_v4 entries, vxlan-v6=$n3_v6 entries"
+n3_v4=$(ip netns exec "node-3" bridge fdb show dev vxlan-v4-ISP1 2>/dev/null | grep -c "dst" || echo 0)
+n3_v6=$(ip netns exec "node-3" bridge fdb show dev vxlan-v6-ISP1 2>/dev/null | grep -c "dst" || echo 0)
+echo "    node-3 (dual-stack): vxlan-v4-ISP1=$n3_v4 entries, vxlan-v6-ISP1=$n3_v6 entries"
 
 print_results
 exit $test_fail

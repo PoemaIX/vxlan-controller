@@ -7,6 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 TESTS=(
+    "test_multichannel_autogen.sh"
     "test_connectivity.sh"
     "test_neigh_suppress.sh"
     "test_controller_failover.sh"
@@ -16,6 +17,12 @@ TESTS=(
     "test_ip_change.sh"
     "test_no_flood.sh"
     "test_firewall.sh"
+    "test_multichannel_connectivity.sh"
+    "test_multichannel_sockopts.sh"
+    "test_multichannel_failover.sh"
+    "test_multichannel_recovery.sh"
+    "test_multichannel_extracost.sh"
+    "test_multichannel_ratelimit.sh"
 )
 
 total=0
