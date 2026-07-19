@@ -71,12 +71,12 @@ type Client struct {
 	addrEngines map[types.AFName]map[types.ChannelName]*filter.AddrSelectEngine
 
 	// Probe (per af, channel)
-	probeConns          map[types.AFName]map[types.ChannelName]*net.UDPConn
-	probeSessions       *crypto.SessionManager
-	pendingHandshakes   map[types.ClientID]*crypto.HandshakeState
-	pendingHandshakesMu sync.Mutex
-	probeResultsMu      sync.Mutex
-	probeResponseChs    map[uint64]chan probeResponseData
+	probeConns           map[types.AFName]map[types.ChannelName]*net.UDPConn
+	probeSessions        *crypto.SessionManager
+	pendingHandshakes    map[types.ClientID]*crypto.HandshakeState
+	pendingHandshakesMu  sync.Mutex
+	probeResultsMu       sync.Mutex
+	probeResponseChs     map[uint64]chan probeResponseData
 	lastProbeTime        time.Time
 	lastProbeResults     map[types.ClientID]*LocalProbeResult
 	lastDebouncedResults map[types.ClientID]*LocalProbeResult
@@ -122,6 +122,7 @@ type ControllerConn struct {
 	localSeqid      uint64
 	remoteSessionID string
 	remoteSeqid     uint64
+	lastProbeID     uint64
 }
 
 // ClientAFConn represents a single (AF, channel) connection to a controller.
@@ -739,7 +740,7 @@ func (c *Client) tcpRecvLoop(ctrlID types.ControllerID, af types.AFName, ch type
 		case protocol.MsgControllerStateUpdate:
 			c.handleControllerStateUpdate(ctrlID, payload)
 		case protocol.MsgControllerProbeRequest:
-			c.handleControllerProbeRequest(ctrlID, payload)
+			c.handleControllerProbeRequest(ctrlID, af, ch, payload)
 		default:
 			vlog.Warnf("[Client] unknown msg_type %d from controller", msgType)
 		}
@@ -868,22 +869,40 @@ func (c *Client) handleControllerStateUpdate(ctrlID types.ControllerID, payload 
 	}
 }
 
-func (c *Client) handleControllerProbeRequest(ctrlID types.ControllerID, payload []byte) {
+func (c *Client) handleControllerProbeRequest(ctrlID types.ControllerID, af types.AFName, ch types.ChannelName, payload []byte) {
 	var req pb.ControllerProbeRequest
 	if err := proto.Unmarshal(payload, &req); err != nil {
 		vlog.Errorf("[Client] unmarshal ControllerProbeRequest error: %v", err)
 		return
 	}
 
-	c.mu.Lock()
-	isAuthority := c.AuthorityCtrl != nil && *c.AuthorityCtrl == ctrlID
-	c.mu.Unlock()
-
 	select {
 	case <-c.initDone:
 	default:
 		return
 	}
+
+	c.mu.Lock()
+	cc, ok := c.Controllers[ctrlID]
+	isAuthority := ok && c.AuthorityCtrl != nil && *c.AuthorityCtrl == ctrlID
+	if isAuthority {
+		if req.ProbeId <= cc.lastProbeID {
+			c.mu.Unlock()
+			return
+		}
+		cc.lastProbeID = req.ProbeId
+		if chans, ok := cc.AFConns[af]; ok {
+			if afc, ok := chans[ch]; ok {
+				select {
+				case <-afc.Done:
+				default:
+					cc.ActiveAF = af
+					cc.ActiveChannel = ch
+				}
+			}
+		}
+	}
+	c.mu.Unlock()
 
 	if !isAuthority {
 		return
@@ -1254,7 +1273,7 @@ type peerEndpointInfo struct {
 
 type peerProbeInfo struct {
 	Time               string                        `json:"time"`
-	AFResults          map[string]*peerAFProbeResult `json:"af_results"`           // key: "af/channel"
+	AFResults          map[string]*peerAFProbeResult `json:"af_results"` // key: "af/channel"
 	DebouncedAFResults map[string]*peerAFProbeResult `json:"debounced_af_results,omitempty"`
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"vxlan-controller/pkg/crypto"
 	"vxlan-controller/pkg/types"
@@ -35,6 +36,11 @@ type AutogenConfig struct {
 	Controllers []string                                `yaml:"controllers"`
 	Clients     []string                                `yaml:"clients"`
 	WebUI       *AutogenWebUI                           `yaml:"web_ui"`
+
+	// ChannelAdditionalCosts is keyed by client_name and emitted verbatim
+	// into that client's channel_additional_costs list. Lets per-node cost
+	// overlays live in the topology file instead of hand-edited client configs.
+	ChannelAdditionalCosts map[string][]ChannelAdditionalCost `yaml:"channel_additional_costs"`
 }
 
 type AutogenWebUI struct {
@@ -324,6 +330,9 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 		cfg.VxlanFirewall = *ag.VxlanFirewall
 	}
 
+	// Precompute deterministic vxlan_name per (af, channel) for this node.
+	vxlanNames := buildVxlanNames(ag.VxlanNamePrefix, ag.Nodes[name])
+
 	// AF settings from this node's (af, channel) pairs
 	cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig)
 	for afName, chans := range ag.Nodes[name] {
@@ -334,7 +343,7 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 				Channel:           chName,
 				Enable:            true,
 				ProbePort:         ag.ProbePort,
-				VxlanName:         ag.VxlanNamePrefix + afName + "-" + string(chName),
+				VxlanName:         vxlanNames[types.AFName(afName)][chName],
 				VxlanVNI:          ag.VxlanVNI,
 				VxlanMTU:          ag.VxlanMTU,
 				VxlanDstPort:      ag.VxlanDstPort,
@@ -379,6 +388,10 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 		cfg.AFSettings[types.AFName(afName)] = inner
 	}
 
+	if rules, ok := ag.ChannelAdditionalCosts[name]; ok && len(rules) > 0 {
+		cfg.ChannelAdditionalCosts = append(cfg.ChannelAdditionalCosts, rules...)
+	}
+
 	return cfg
 }
 
@@ -387,4 +400,77 @@ func formatAddrPort(host string, port uint16) string {
 		return fmt.Sprintf("[%s]:%d", host, port)
 	}
 	return fmt.Sprintf("%s:%d", host, port)
+}
+
+// MaxIfnameLen is the Linux IFNAMSIZ-1 (15 char limit for interface names).
+const MaxIfnameLen = 15
+
+// buildVxlanNames produces a deterministic, IFNAMSIZ-safe vxlan_name for every
+// (af, channel) on a single node.
+//
+// Layout: <prefix><af>-<isp_truncated><suffix>
+//   - <prefix><af> joined directly (no separator) so the prefix carries any
+//     trailing separator the user wants.
+//   - One '-' separator before the ISP segment.
+//   - <suffix> is a 1- or 2-digit, 1-based index derived from the alphabetical
+//     position of the channel name within its AF on this node. The digit
+//     width is determined by the largest ISP count across all AFs on the node
+//     (≤10 → 1 digit, ≤100 → 2 digits) so every device on the node has the
+//     same suffix width, and the result is stable across regenerations.
+//   - <isp_truncated> is the channel name truncated from the right to fit
+//     the remaining budget (15 - len(<prefix><af>-) - len(suffix)).
+//
+// Per-node deterministic indexing means names never silently collide on a
+// single host even after aggressive truncation. Returns
+// map[af][channel] -> "<vxlan_name>".
+func buildVxlanNames(prefix string, afs map[string]AutogenAFChannels) map[types.AFName]map[types.ChannelName]string {
+	out := make(map[types.AFName]map[types.ChannelName]string)
+
+	// Sorted channel list per AF (alphabetical) for stable index assignment.
+	type ordered struct {
+		af    string
+		chans []types.ChannelName
+	}
+	var sortedAFs []ordered
+	maxIspsPerAF := 0
+	for afName, chans := range afs {
+		names := make([]types.ChannelName, 0, len(chans))
+		for ch := range chans {
+			names = append(names, ch)
+		}
+		sort.Slice(names, func(i, j int) bool { return string(names[i]) < string(names[j]) })
+		sortedAFs = append(sortedAFs, ordered{af: afName, chans: names})
+		if len(names) > maxIspsPerAF {
+			maxIspsPerAF = len(names)
+		}
+	}
+
+	// Suffix digit width: minimum needed to represent maxIspsPerAF (1-based).
+	suffixWidth := 1
+	if maxIspsPerAF > 9 {
+		suffixWidth = 2
+	}
+
+	for _, e := range sortedAFs {
+		inner := make(map[types.ChannelName]string, len(e.chans))
+		base := prefix + e.af + "-"
+		budget := MaxIfnameLen - len(base) - suffixWidth
+		if budget < 1 {
+			// Pathological: prefix+af+dash+suffix alone overflows. Fall back
+			// to a bare-minimum name so we don't generate something invalid;
+			// validateClientUniqueness will reject it loudly.
+			budget = 1
+		}
+		for i, ch := range e.chans {
+			idx := i + 1
+			isp := string(ch)
+			if len(isp) > budget {
+				isp = isp[:budget]
+			}
+			suffix := fmt.Sprintf("%0*d", suffixWidth, idx)
+			inner[ch] = base + isp + suffix
+		}
+		out[types.AFName(e.af)] = inner
+	}
+	return out
 }

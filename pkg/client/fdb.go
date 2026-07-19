@@ -282,6 +282,8 @@ func (c *Client) addFDBEntry(key fdbKey, entry fdbEntry) {
 		return
 	}
 
+	c.deleteFDBEntriesForMACOnManagedLinks(mac)
+
 	link, err := netlink.LinkByName(entry.DevName)
 	if err != nil {
 		vlog.Errorf("[Client] FDB add: link %s not found: %v", entry.DevName, err)
@@ -325,28 +327,43 @@ func (c *Client) deleteFDBEntry(key fdbKey, entry fdbEntry) {
 		return
 	}
 
-	link, err := netlink.LinkByName(entry.DevName)
+	c.deleteFDBEntriesForMACOnLink(entry.DevName, mac)
+}
+
+func (c *Client) deleteFDBEntriesForMACOnManagedLinks(mac net.HardwareAddr) {
+	for _, chans := range c.VxlanDevs {
+		for _, vd := range chans {
+			c.deleteFDBEntriesForMACOnLink(vd.Name, mac)
+		}
+	}
+}
+
+func (c *Client) deleteFDBEntriesForMACOnLink(devName string, mac net.HardwareAddr) {
+	if devName == "" {
+		return
+	}
+
+	link, err := netlink.LinkByName(devName)
 	if err != nil {
 		return
 	}
 	linkIdx := link.Attrs().Index
 
-	// Delete self and master entries
-	netlink.NeighDel(&netlink.Neigh{
-		LinkIndex:    linkIdx,
-		Family:       unix.AF_BRIDGE,
-		State:        netlink.NUD_PERMANENT,
-		Flags:        netlink.NTF_SELF,
-		HardwareAddr: mac,
-		IP:           entry.DstIP,
-	})
-	netlink.NeighDel(&netlink.Neigh{
-		LinkIndex:    linkIdx,
-		Family:       unix.AF_BRIDGE,
-		State:        netlink.NUD_NOARP,
-		Flags:        netlink.NTF_MASTER,
-		HardwareAddr: mac,
-	})
+	neighs, err := netlink.NeighList(linkIdx, unix.AF_BRIDGE)
+	if err != nil {
+		vlog.Warnf("[Client] FDB delete %s on %s: NeighList: %v", mac, devName, err)
+		return
+	}
+
+	for i := range neighs {
+		n := neighs[i]
+		if n.LinkIndex != linkIdx || !bytes.Equal(n.HardwareAddr, mac) {
+			continue
+		}
+		if err := netlink.NeighDel(&n); err != nil {
+			vlog.Warnf("[Client] FDB delete %s on %s: %v", mac, devName, err)
+		}
+	}
 }
 
 func (c *Client) cleanupFDB() {

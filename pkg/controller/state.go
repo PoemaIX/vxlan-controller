@@ -77,8 +77,9 @@ type ClientInfo struct {
 // QueueItem is the sendqueue element. State and Message are independent;
 // if both are set, the receiver processes them as two separate messages.
 type QueueItem struct {
-	State   []byte // encoded state update (full or inc), nil if none
-	Message []byte // encoded non-state message (probe req, etc.), nil if none
+	State            []byte // encoded state update (full or inc), nil if none
+	Message          []byte // encoded non-state message (probe req, etc.), nil if none
+	BroadcastMessage bool   // send Message on all current AF/channel conns
 }
 
 // ClientConn represents the Controller's connection state with a single Client.

@@ -25,6 +25,7 @@ const (
 	sendQueueSize     = 256
 	keepAlivePeriod   = 30 * time.Second
 	offlineCheckEvery = 30 * time.Second
+	controlWriteLimit = 2 * time.Second
 )
 
 // Controller implements the VXLAN controller.
@@ -56,7 +57,8 @@ type Controller struct {
 	topoFirst         time.Time
 
 	// Probe counter
-	probeCounter uint64
+	probeCounter          uint64
+	lastProbeResultByPeer map[types.ClientID]uint64
 
 	// Periodic probe ticker
 	probeTicker *time.Ticker
@@ -100,17 +102,18 @@ func New(cfg *config.ControllerConfig) *Controller {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	c := &Controller{
-		Config:           cfg,
-		PrivateKey:       cfg.PrivateKey,
-		ControllerID:     pubKey,
-		State:            newControllerState(),
-		afListeners:      make(map[types.AFName]map[types.ChannelName]*AFListener),
-		clients:          make(map[types.ClientID]*ClientConn),
-		udpSessions:      crypto.NewSessionManager(),
-		udpAddrs:         make(map[udpAddrKey]*net.UDPAddr),
-		clientMcastStats: make(map[types.ClientID]*ClientMcastStats),
-		ctx:              ctx,
-		cancel:           cancel,
+		Config:                cfg,
+		PrivateKey:            cfg.PrivateKey,
+		ControllerID:          pubKey,
+		State:                 newControllerState(),
+		afListeners:           make(map[types.AFName]map[types.ChannelName]*AFListener),
+		clients:               make(map[types.ClientID]*ClientConn),
+		udpSessions:           crypto.NewSessionManager(),
+		udpAddrs:              make(map[udpAddrKey]*net.UDPAddr),
+		clientMcastStats:      make(map[types.ClientID]*ClientMcastStats),
+		lastProbeResultByPeer: make(map[types.ClientID]uint64),
+		ctx:                   ctx,
+		cancel:                cancel,
 	}
 
 	// Build allowed keys list
@@ -554,6 +557,10 @@ func (c *Controller) tcpRecvLoop(cc *ClientConn, afc *AFConn, session *crypto.Se
 		if ci, ok := c.State.Clients[cc.ClientID]; ok {
 			ci.LastSeen = time.Now()
 		}
+		if chans, ok := cc.AFConns[afc.AF]; ok && chans[afc.Channel] == afc {
+			cc.ActiveAF = afc.AF
+			cc.ActiveChannel = afc.Channel
+		}
 		c.mu.Unlock()
 
 		switch msgType {
@@ -691,6 +698,14 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 	var srcID types.ClientID
 	copy(srcID[:], results.SourceClientId)
 
+	if results.ProbeId != 0 {
+		if last := c.lastProbeResultByPeer[srcID]; results.ProbeId <= last {
+			c.mu.Unlock()
+			return
+		}
+		c.lastProbeResultByPeer[srcID] = results.ProbeId
+	}
+
 	// Ensure src row exists
 	if c.State.LatencyMatrix[srcID] == nil {
 		c.State.LatencyMatrix[srcID] = make(map[types.ClientID]*types.LatencyInfo)
@@ -757,17 +772,10 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 
 		if newReachable {
 			li.LastReachable = now
-			c.State.LatencyMatrix[srcID][dstID] = li
 		} else if old := c.State.LatencyMatrix[srcID][dstID]; old != nil {
-			if now.Sub(old.LastReachable) > c.Config.ClientOfflineTimeout {
-				li.LastReachable = old.LastReachable
-				c.State.LatencyMatrix[srcID][dstID] = li
-			} else {
-				old.RawAFs = li.RawAFs
-			}
-		} else {
-			c.State.LatencyMatrix[srcID][dstID] = li
+			li.LastReachable = old.LastReachable
 		}
+		c.State.LatencyMatrix[srcID][dstID] = li
 	}
 
 	c.resetTopoDebounce()
@@ -826,7 +834,7 @@ func (c *Controller) triggerSyncNewClient() {
 			continue
 		}
 		select {
-		case cc.SendQueue <- QueueItem{Message: msg}:
+		case cc.SendQueue <- QueueItem{Message: msg, BroadcastMessage: true}:
 		default:
 		}
 	}
@@ -918,24 +926,34 @@ func (c *Controller) clientSendLoop(cc *ClientConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
 
-		// Pick active (af, channel) if nil
-		if cc.ActiveAF == "" {
-			cc.ActiveAF, cc.ActiveChannel = c.pickActiveAFChannel(cc)
-		}
-		if cc.ActiveAF == "" {
-			c.mu.Unlock()
-			continue // nothing available
+		var active *AFConn
+		if item.State != nil || item.Message != nil && !item.BroadcastMessage || !cc.Synced {
+			// Pick active (af, channel) if nil
+			if cc.ActiveAF == "" {
+				cc.ActiveAF, cc.ActiveChannel = c.pickActiveAFChannel(cc)
+			}
+			if cc.ActiveAF != "" {
+				if chans, ok := cc.AFConns[cc.ActiveAF]; ok {
+					active = chans[cc.ActiveChannel]
+				}
+			}
 		}
 
-		chans, ok := cc.AFConns[cc.ActiveAF]
-		if !ok {
-			c.mu.Unlock()
-			continue
+		var broadcastTargets []*AFConn
+		if item.Message != nil && item.BroadcastMessage {
+			broadcastTargets = c.allClientAFConns(cc)
+			if cc.ActiveAF == "" {
+				cc.ActiveAF, cc.ActiveChannel = c.pickActiveAFChannel(cc)
+			}
 		}
-		afc := chans[cc.ActiveChannel]
-		if afc == nil {
-			c.mu.Unlock()
-			continue
+
+		if active == nil && !item.BroadcastMessage {
+			cc.ActiveAF, cc.ActiveChannel = c.pickActiveAFChannel(cc)
+			if cc.ActiveAF != "" {
+				if chans, ok := cc.AFConns[cc.ActiveAF]; ok {
+					active = chans[cc.ActiveChannel]
+				}
+			}
 		}
 
 		// If not synced, overwrite State with full state
@@ -948,15 +966,13 @@ func (c *Controller) clientSendLoop(cc *ClientConn) {
 
 		// Send State
 		if item.State != nil {
+			if active == nil {
+				continue
+			}
 			msgType := protocol.MsgType(item.State[0])
 			payload := item.State[1:]
-			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
-				select {
-				case <-afc.Done:
-					continue
-				default:
-				}
-				vlog.Errorf("[Controller] send error to %s: %v", cc.ClientID.Hex()[:8], err)
+			if err := writeTCPMessageWithDeadline(active, msgType, payload); err != nil {
+				c.handleClientSendError(cc, active, err)
 				continue
 			}
 		}
@@ -965,16 +981,54 @@ func (c *Controller) clientSendLoop(cc *ClientConn) {
 		if item.Message != nil {
 			msgType := protocol.MsgType(item.Message[0])
 			payload := item.Message[1:]
-			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
-				select {
-				case <-afc.Done:
-					continue
-				default:
+			if item.BroadcastMessage {
+				for _, target := range broadcastTargets {
+					if err := writeTCPMessageWithDeadline(target, msgType, payload); err != nil {
+						c.handleClientSendError(cc, target, err)
+					}
 				}
-				vlog.Errorf("[Controller] send error to %s: %v", cc.ClientID.Hex()[:8], err)
+			} else {
+				if active == nil {
+					continue
+				}
+				if err := writeTCPMessageWithDeadline(active, msgType, payload); err != nil {
+					c.handleClientSendError(cc, active, err)
+				}
 			}
 		}
 	}
+}
+
+func writeTCPMessageWithDeadline(afc *AFConn, msgType protocol.MsgType, payload []byte) error {
+	if afc == nil || afc.TCPConn == nil {
+		return net.ErrClosed
+	}
+	if err := afc.TCPConn.SetWriteDeadline(time.Now().Add(controlWriteLimit)); err != nil {
+		return err
+	}
+	err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload)
+	_ = afc.TCPConn.SetWriteDeadline(time.Time{})
+	return err
+}
+
+func (c *Controller) handleClientSendError(cc *ClientConn, afc *AFConn, err error) {
+	select {
+	case <-afc.Done:
+		return
+	default:
+	}
+	vlog.Errorf("[Controller] send error to %s on AF=%s channel=%s: %v",
+		cc.ClientID.Hex()[:8], afc.AF, afc.Channel, err)
+	afc.CloseDone()
+	_ = afc.TCPConn.Close()
+
+	c.mu.Lock()
+	if cc.ActiveAF == afc.AF && cc.ActiveChannel == afc.Channel {
+		cc.ActiveAF = ""
+		cc.ActiveChannel = ""
+		cc.Synced = false
+	}
+	c.mu.Unlock()
 }
 
 // pickActiveAFChannel selects the (af, channel) with the earliest connection time.
@@ -986,6 +1040,11 @@ func (c *Controller) pickActiveAFChannel(cc *ClientConn) (types.AFName, types.Ch
 	first := true
 	for af, chans := range cc.AFConns {
 		for ch, afc := range chans {
+			select {
+			case <-afc.Done:
+				continue
+			default:
+			}
 			if first || afc.ConnectedAt.Before(earliestTime) {
 				earliestAF = af
 				earliestCh = ch
@@ -995,6 +1054,21 @@ func (c *Controller) pickActiveAFChannel(cc *ClientConn) (types.AFName, types.Ch
 		}
 	}
 	return earliestAF, earliestCh
+}
+
+func (c *Controller) allClientAFConns(cc *ClientConn) []*AFConn {
+	var afcs []*AFConn
+	for _, chans := range cc.AFConns {
+		for _, afc := range chans {
+			select {
+			case <-afc.Done:
+				continue
+			default:
+			}
+			afcs = append(afcs, afc)
+		}
+	}
+	return afcs
 }
 
 // clientConnCount returns the total number of active (af, channel) conns.
@@ -1042,6 +1116,7 @@ func (c *Controller) checkOfflineClients() {
 	for _, id := range removed {
 		delete(c.State.Clients, id)
 		delete(c.State.LatencyMatrix, id)
+		delete(c.lastProbeResultByPeer, id)
 		// Remove from other clients' latency matrix
 		for _, dsts := range c.State.LatencyMatrix {
 			delete(dsts, id)
@@ -1189,8 +1264,14 @@ func (c *Controller) udpReadLoop(al *AFListener) {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
+		if n == 0 {
+			vlog.Verbosef("[Controller] ignoring empty UDP packet on %s/%s from %s",
+				al.AF, al.Channel, remoteAddr)
+			continue
+		}
+
 		// Check if it's a handshake message
-		if n > 0 && data[0] == byte(protocol.MsgHandshakeInit) {
+		if data[0] == byte(protocol.MsgHandshakeInit) {
 			go c.handleUDPHandshake(al, data, remoteAddr)
 			continue
 		}

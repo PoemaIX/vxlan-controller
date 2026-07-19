@@ -376,6 +376,10 @@ func validateClientUniqueness(afs map[types.AFName]map[types.ChannelName]*Client
 			}
 			if cc.VxlanName != "" {
 				loc := fmt.Sprintf("%s/%s", af, ch)
+				if len(cc.VxlanName) > 15 {
+					return fmt.Errorf("vxlan_name %q (%d chars) exceeds Linux IFNAMSIZ-1 (15) at %s; shorten vxlan_name_prefix or channel name",
+						cc.VxlanName, len(cc.VxlanName), loc)
+				}
 				if prev, ok := vxlanNames[cc.VxlanName]; ok {
 					return fmt.Errorf("vxlan_name %q duplicated: %s and %s", cc.VxlanName, prev, loc)
 				}
