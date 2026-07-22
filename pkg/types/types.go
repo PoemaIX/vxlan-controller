@@ -35,6 +35,15 @@ type AFName string
 // ChannelName names a channel within an AF (multiple ISPs per AF).
 type ChannelName string
 
+// ChannelPair identifies one probed link between two nodes: the local node's
+// uplink (Local) and the peer node's uplink (Peer). Channel names are per-node
+// labels — the two ends of a link may use different names — so both sides are
+// needed to identify an edge.
+type ChannelPair struct {
+	Local ChannelName
+	Peer  ChannelName
+}
+
 // DefaultChannelName is the name assigned to the first/only channel of an AF.
 const DefaultChannelName ChannelName = "ISP1"
 
@@ -93,24 +102,24 @@ type AFLatency struct {
 	FinalCost   float64 // quality_cost + forward_cost + switch_cost
 }
 
-// LatencyInfo stores all per-(AF, channel) probe data between a src→dst client pair.
+// LatencyInfo stores all per-(AF, channel pair) probe data between a src→dst client pair.
 type LatencyInfo struct {
-	AFs           map[AFName]map[ChannelName]*AFLatency // debounced (used for routing)
-	RawAFs        map[AFName]map[ChannelName]*AFLatency // raw latest probe result
+	AFs           map[AFName]map[ChannelPair]*AFLatency // debounced (used for routing)
+	RawAFs        map[AFName]map[ChannelPair]*AFLatency // raw latest probe result
 	LastReachable time.Time                             // last time any AF was reachable (packet_loss < 1.0)
 }
 
-// BestPath selects the best (AF, channel) and returns (af, channel, cost).
+// BestPath selects the best (AF, channel pair) and returns (af, pair, cost).
 // Selection: lowest priority first, then lowest final_cost.
-// Returns ("", "", INF_LATENCY) if nothing is reachable.
-func (li *LatencyInfo) BestPath() (AFName, ChannelName, float64) {
+// Returns ("", {}, INF_LATENCY) if nothing is reachable.
+func (li *LatencyInfo) BestPath() (AFName, ChannelPair, float64) {
 	bestAF := AFName("")
-	bestCh := ChannelName("")
+	bestPair := ChannelPair{}
 	bestCost := INF_LATENCY
 	bestPriority := int(1<<31 - 1)
 
-	for af, chans := range li.AFs {
-		for ch, al := range chans {
+	for af, pairs := range li.AFs {
+		for pair, al := range pairs {
 			if al.Mean >= INF_LATENCY {
 				continue
 			}
@@ -123,24 +132,25 @@ func (li *LatencyInfo) BestPath() (AFName, ChannelName, float64) {
 				bestPriority = al.Priority
 				bestCost = cost
 				bestAF = af
-				bestCh = ch
+				bestPair = pair
 			}
 		}
 	}
-	return bestAF, bestCh, bestCost
+	return bestAF, bestPair, bestCost
 }
 
 // BestPathEntry is a precomputed BestPath result.
 type BestPathEntry struct {
-	AF      AFName
-	Channel ChannelName
-	Cost    float64    // final_cost for routing (used by Floyd-Warshall)
-	Raw     *AFLatency // debounced probe data for the selected (af, channel)
-	Latest  *AFLatency // raw latest probe data for the selected (af, channel) (webui display)
+	AF          AFName
+	Channel     ChannelName // local (src-side) channel
+	PeerChannel ChannelName // channel on the dst side
+	Cost        float64     // final_cost for routing (used by Floyd-Warshall)
+	Raw         *AFLatency  // debounced probe data for the selected (af, pair)
+	Latest      *AFLatency  // raw latest probe data for the selected (af, pair) (webui display)
 }
 
-// lookupLatency returns li.AFs[af][ch] (or li.RawAFs[af][ch]) safely.
-func lookupChan(m map[AFName]map[ChannelName]*AFLatency, af AFName, ch ChannelName) *AFLatency {
+// lookupChan returns m[af][pair] safely.
+func lookupChan(m map[AFName]map[ChannelPair]*AFLatency, af AFName, pair ChannelPair) *AFLatency {
 	if m == nil {
 		return nil
 	}
@@ -148,7 +158,7 @@ func lookupChan(m map[AFName]map[ChannelName]*AFLatency, af AFName, ch ChannelNa
 	if !ok {
 		return nil
 	}
-	return cm[ch]
+	return cm[pair]
 }
 
 // ComputeBestPaths precomputes BestPath() for every src→dst pair.
@@ -157,14 +167,15 @@ func ComputeBestPaths(m map[ClientID]map[ClientID]*LatencyInfo) map[ClientID]map
 	for src, dsts := range m {
 		row := make(map[ClientID]*BestPathEntry, len(dsts))
 		for dst, li := range dsts {
-			af, ch, cost := li.BestPath()
+			af, pair, cost := li.BestPath()
 			if af != "" {
 				bp := &BestPathEntry{
-					AF:      af,
-					Channel: ch,
-					Cost:    cost,
-					Raw:     lookupChan(li.AFs, af, ch),
-					Latest:  lookupChan(li.RawAFs, af, ch),
+					AF:          af,
+					Channel:     pair.Local,
+					PeerChannel: pair.Peer,
+					Cost:        cost,
+					Raw:         lookupChan(li.AFs, af, pair),
+					Latest:      lookupChan(li.RawAFs, af, pair),
 				}
 				row[dst] = bp
 			}
@@ -191,9 +202,14 @@ func ComputeBestPathsStatic(
 			var bestCh ChannelName
 			bestCost := INF_LATENCY
 
+			var bestPair ChannelPair
+
 			for af, chans := range afs {
 				for ch, cost := range chans {
-					// Check reachability from probe data.
+					// Check reachability from probe data. The static cost's
+					// channel names the src node's local uplink; any reachable
+					// pair using that local channel qualifies — pick the pair
+					// with the best probed quality for the peer side.
 					li, srcOK := latencyMatrix[src]
 					if !srcOK {
 						continue
@@ -202,14 +218,15 @@ func ComputeBestPathsStatic(
 					if !dstOK {
 						continue
 					}
-					al := lookupChan(info.AFs, af, ch)
-					if al == nil || al.PacketLoss >= 1.0 {
+					pair, ok := bestReachablePair(info.AFs, af, ch)
+					if !ok {
 						continue
 					}
 					if cost < bestCost {
 						bestCost = cost
 						bestAF = af
 						bestCh = ch
+						bestPair = pair
 					}
 				}
 			}
@@ -218,16 +235,17 @@ func ComputeBestPathsStatic(
 				var raw, latest *AFLatency
 				if li, ok := latencyMatrix[src]; ok {
 					if info, ok := li[dst]; ok {
-						raw = lookupChan(info.AFs, bestAF, bestCh)
-						latest = lookupChan(info.RawAFs, bestAF, bestCh)
+						raw = lookupChan(info.AFs, bestAF, bestPair)
+						latest = lookupChan(info.RawAFs, bestAF, bestPair)
 					}
 				}
 				row[dst] = &BestPathEntry{
-					AF:      bestAF,
-					Channel: bestCh,
-					Cost:    bestCost,
-					Raw:     raw,
-					Latest:  latest,
+					AF:          bestAF,
+					Channel:     bestCh,
+					PeerChannel: bestPair.Peer,
+					Cost:        bestCost,
+					Raw:         raw,
+					Latest:      latest,
 				}
 			}
 		}
@@ -239,11 +257,33 @@ func ComputeBestPathsStatic(
 	return result
 }
 
+// bestReachablePair scans m[af] for pairs whose Local channel is localCh and
+// returns the reachable one (PacketLoss < 1.0) with the lowest latency mean.
+func bestReachablePair(m map[AFName]map[ChannelPair]*AFLatency, af AFName, localCh ChannelName) (ChannelPair, bool) {
+	best := ChannelPair{}
+	bestMean := INF_LATENCY
+	found := false
+	for pair, al := range m[af] {
+		if pair.Local != localCh || al == nil || al.PacketLoss >= 1.0 {
+			continue
+		}
+		if !found || al.Mean < bestMean {
+			best = pair
+			bestMean = al.Mean
+			found = true
+		}
+	}
+	return best, found
+}
+
 // RouteEntry is a single cell in RouteMatrix.
 type RouteEntry struct {
 	NextHop ClientID
 	AF      AFName
-	Channel ChannelName
+	Channel ChannelName // local channel on the node this route belongs to
+	// PeerChannel is the uplink on the NextHop side; the FDB dst IP comes from
+	// the nexthop's endpoint for this channel. Empty falls back to Channel.
+	PeerChannel ChannelName
 }
 
 // RouteTableEntry stores MAC/IP ownership.

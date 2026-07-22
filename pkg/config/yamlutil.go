@@ -258,6 +258,7 @@ func MarshalClientConfig(cfg *ClientConfig) ([]byte, error) {
 	}
 	m.SetNode("address_families", afs.node)
 
+	m.Set("controller_idle_timeout", int(cfg.ControllerIdleTimeout/time.Second))
 	m.Set("init_timeout", int(cfg.InitTimeout/time.Second))
 	m.Set("stats_interval_s", int(cfg.StatsInterval/time.Second))
 	m.Set("probe_window_size", cfg.ProbeWindowSize)

@@ -30,10 +30,10 @@ import (
 	pb "vxlan-controller/proto"
 )
 
-// AFChannel identifies one (AF, Channel) tuple.
+// AFChannel identifies one (AF, local>peer channel pair) link toward a peer.
 type AFChannel struct {
-	AF      types.AFName
-	Channel types.ChannelName
+	AF   types.AFName
+	Pair types.ChannelPair
 }
 
 // Client implements the VXLAN client.
@@ -133,6 +133,10 @@ type ClientAFConn struct {
 	Session     *crypto.Session
 	CommUDPConn net.PacketConn
 	UDPSession  *crypto.Session
+	// CtrlAddr is the controller address this conn dialed — a controller may
+	// have several addresses, so UDP (broadcast relay) must target the one
+	// actually in use, not the first configured.
+	CtrlAddr    netip.AddrPort
 	Cancel      context.CancelFunc
 	Connected   bool
 	Done        chan struct{}
@@ -156,10 +160,10 @@ type ControllerView struct {
 
 // LocalProbeResult stores the last probe result for a peer (client-side).
 type LocalProbeResult struct {
-	AFResults map[types.AFName]map[types.ChannelName]*LocalAFProbeResult
+	AFResults map[types.AFName]map[types.ChannelPair]*LocalAFProbeResult
 }
 
-// LocalAFProbeResult stores per-(af, channel) probe result.
+// LocalAFProbeResult stores per-(af, channel pair) probe result.
 type LocalAFProbeResult struct {
 	LatencyMean float64
 	LatencyStd  float64
@@ -169,7 +173,7 @@ type LocalAFProbeResult struct {
 type probeHistoryKey struct {
 	ClientID types.ClientID
 	AF       types.AFName
-	Channel  types.ChannelName
+	Pair     types.ChannelPair
 }
 
 // ClientInfoView is the Client's view of a ClientInfo from the Controller.
@@ -301,15 +305,26 @@ func (c *Client) Run() error {
 		go c.controllerSendLoop(cc)
 	}
 
-	// Step 5: Start TCP connections to all controllers per (af, channel)
+	// Step 5: Start TCP connections to all controllers per (af, channel).
+	// A controller may be listed with several addresses (one per uplink);
+	// keep a single connection per (controller, af, channel) and rotate
+	// through the addresses on failure.
 	for afName, chans := range c.Config.AFSettings {
 		for chName, cc := range chans {
 			if !cc.Enable {
 				continue
 			}
+			grouped := make(map[types.ControllerID][]config.ControllerEndpoint)
+			var order []types.ControllerID
 			for _, ctrl := range cc.Controllers {
 				ctrlID := types.ControllerID(ctrl.PubKey)
-				go c.tcpConnLoop(ctrlID, afName, chName, ctrl)
+				if _, ok := grouped[ctrlID]; !ok {
+					order = append(order, ctrlID)
+				}
+				grouped[ctrlID] = append(grouped[ctrlID], ctrl)
+			}
+			for _, ctrlID := range order {
+				go c.tcpConnLoop(ctrlID, afName, chName, grouped[ctrlID])
 			}
 		}
 	}
@@ -414,9 +429,10 @@ func (c *Client) Stop() {
 	}
 }
 
-func (c *Client) tcpConnLoop(ctrlID types.ControllerID, af types.AFName, ch types.ChannelName, ctrl config.ControllerEndpoint) {
+func (c *Client) tcpConnLoop(ctrlID types.ControllerID, af types.AFName, ch types.ChannelName, ctrls []config.ControllerEndpoint) {
 	backoff := time.Second
 	maxBackoff := 30 * time.Second
+	idx := 0
 
 	for {
 		select {
@@ -425,13 +441,16 @@ func (c *Client) tcpConnLoop(ctrlID types.ControllerID, af types.AFName, ch type
 		default:
 		}
 
+		ctrl := ctrls[idx%len(ctrls)]
 		start := time.Now()
 		err := c.connectToController(ctrlID, af, ch, ctrl)
 		elapsed := time.Since(start)
 
 		if err != nil {
-			vlog.Warnf("[Client] connection to controller %s AF=%s channel=%s failed: %v", ctrlID.Hex()[:8], af, ch, err)
+			vlog.Warnf("[Client] connection to controller %s AF=%s channel=%s addr=%s failed: %v", ctrlID.Hex()[:8], af, ch, ctrl.Addr, err)
 		}
+		// Try the controller's next address on the next attempt.
+		idx++
 
 		if elapsed > 10*time.Second {
 			backoff = time.Second
@@ -575,6 +594,7 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 		Session:     session,
 		CommUDPConn: commUDPConn,
 		UDPSession:  udpSession,
+		CtrlAddr:    ctrl.Addr,
 		Cancel:      afCancel,
 		Connected:   true,
 		Done:        make(chan struct{}),
@@ -717,6 +737,7 @@ func (c *Client) commUDPReadLoop(ctrlID types.ControllerID, af types.AFName, ch 
 }
 
 func (c *Client) tcpRecvLoop(ctrlID types.ControllerID, af types.AFName, ch types.ChannelName, afc *ClientAFConn) {
+	idle := c.Config.ControllerIdleTimeout
 	for {
 		select {
 		case <-afc.Done:
@@ -726,6 +747,13 @@ func (c *Client) tcpRecvLoop(ctrlID types.ControllerID, af types.AFName, ch type
 		default:
 		}
 
+		// A silently dead path (link down, no RST) would otherwise block this
+		// read for minutes. The controller broadcasts probe requests every
+		// probe_interval_s, so an idle conn is a dead conn — bail out and let
+		// tcpConnLoop reconnect, rotating to the controller's next address.
+		if idle > 0 {
+			_ = afc.TCPConn.SetReadDeadline(time.Now().Add(idle))
+		}
 		msgType, payload, err := protocol.ReadTCPMessage(afc.TCPConn, afc.Session)
 		if err != nil {
 			if err != io.EOF {
@@ -981,6 +1009,21 @@ func (c *Client) filterRouteTable(rt []*types.RouteTableEntry) []*types.RouteTab
 	return filtered
 }
 
+// clientControlWriteLimit bounds a single control-plane write. A stalled
+// write means the path is dead; close the conn so the recv loop bails and
+// tcpConnLoop reconnects (rotating to the controller's next address).
+const clientControlWriteLimit = 2 * time.Second
+
+func writeControl(afc *ClientAFConn, msgType protocol.MsgType, payload []byte) error {
+	_ = afc.TCPConn.SetWriteDeadline(time.Now().Add(clientControlWriteLimit))
+	err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload)
+	_ = afc.TCPConn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		afc.TCPConn.Close()
+	}
+	return err
+}
+
 func (c *Client) controllerSendLoop(cc *ControllerConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
@@ -1011,7 +1054,7 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 			if fullMsg != nil {
 				msgType := protocol.MsgType(fullMsg[0])
 				payload := fullMsg[1:]
-				if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload); err != nil {
+				if err := writeControl(afc, msgType, payload); err != nil {
 					continue
 				}
 			}
@@ -1036,7 +1079,7 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 				vlog.Errorf("[Client] marshal incremental MACUpdate error: %v", err)
 				continue
 			}
-			if err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, protocol.MsgMACUpdate, data); err != nil {
+			if err := writeControl(afc, protocol.MsgMACUpdate, data); err != nil {
 				continue
 			}
 		}
@@ -1044,7 +1087,7 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 		if item.Message != nil {
 			msgType := protocol.MsgType(item.Message[0])
 			payload := item.Message[1:]
-			protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload)
+			_ = writeControl(afc, msgType, payload)
 		}
 	}
 }
@@ -1273,7 +1316,7 @@ type peerEndpointInfo struct {
 
 type peerProbeInfo struct {
 	Time               string                        `json:"time"`
-	AFResults          map[string]*peerAFProbeResult `json:"af_results"` // key: "af/channel"
+	AFResults          map[string]*peerAFProbeResult `json:"af_results"` // key: "af/localCh>peerCh"
 	DebouncedAFResults map[string]*peerAFProbeResult `json:"debounced_af_results,omitempty"`
 }
 
@@ -1325,9 +1368,9 @@ func (c *Client) apiPeerList() ([]peerListEntry, error) {
 				Time:      c.lastProbeTime.Format(time.RFC3339),
 				AFResults: make(map[string]*peerAFProbeResult),
 			}
-			for af, chans := range pr.AFResults {
-				for ch, afr := range chans {
-					key := string(af) + "/" + string(ch)
+			for af, pairs := range pr.AFResults {
+				for pair, afr := range pairs {
+					key := string(af) + "/" + string(pair.Local) + ">" + string(pair.Peer)
 					entry.Probe.AFResults[key] = &peerAFProbeResult{
 						LatencyMean: afr.LatencyMean,
 						LatencyStd:  afr.LatencyStd,
@@ -1337,9 +1380,9 @@ func (c *Client) apiPeerList() ([]peerListEntry, error) {
 			}
 			if dr, ok := c.lastDebouncedResults[clientID]; ok {
 				entry.Probe.DebouncedAFResults = make(map[string]*peerAFProbeResult)
-				for af, chans := range dr.AFResults {
-					for ch, afr := range chans {
-						key := string(af) + "/" + string(ch)
+				for af, pairs := range dr.AFResults {
+					for pair, afr := range pairs {
+						key := string(af) + "/" + string(pair.Local) + ">" + string(pair.Peer)
 						entry.Probe.DebouncedAFResults[key] = &peerAFProbeResult{
 							LatencyMean: afr.LatencyMean,
 							LatencyStd:  afr.LatencyStd,
@@ -1531,13 +1574,16 @@ func (c *Client) apiShowRoute(params json.RawMessage) ([]ShowRouteEntry, error) 
 							re.NextHop = routeEntry.NextHop.Hex()[:16]
 						}
 						if chans, ok := nhInfo.Endpoints[routeEntry.AF]; ok {
-							if ep, ok2 := chans[routeEntry.Channel]; ok2 {
+							if ep, ok2 := chans[peerChannelOf(routeEntry)]; ok2 {
 								re.NextHopIP = ep.IP.String()
 							}
 						}
 					}
 					re.AF = string(routeEntry.AF)
 					re.Channel = string(routeEntry.Channel)
+					if routeEntry.PeerChannel != "" && routeEntry.PeerChannel != routeEntry.Channel {
+						re.Channel += ">" + string(routeEntry.PeerChannel)
+					}
 				}
 			}
 

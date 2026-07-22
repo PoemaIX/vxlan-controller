@@ -113,6 +113,9 @@ func (c *Client) computeRateLimitCaps() map[afChKey]uint64 {
 			k := afChKey{AF: af, Channel: ch}
 			myUp := mine.UpBwKbps
 
+			// A local channel can carry traffic to any of a peer's channels in
+			// the same AF (channel names are per-node labels), so consider
+			// every peer endpoint in the AF.
 			minPeerDown := uint64(0)
 			havePeer := false
 			for peerID, ci := range cc.State.Clients {
@@ -123,16 +126,14 @@ func (c *Client) computeRateLimitCaps() map[afChKey]uint64 {
 				if !ok {
 					continue
 				}
-				ep, ok := peerChans[ch]
-				if !ok {
-					continue
-				}
-				if ep.DownBwKbps == 0 {
-					continue
-				}
-				if !havePeer || ep.DownBwKbps < minPeerDown {
-					minPeerDown = ep.DownBwKbps
-					havePeer = true
+				for _, ep := range peerChans {
+					if ep.DownBwKbps == 0 {
+						continue
+					}
+					if !havePeer || ep.DownBwKbps < minPeerDown {
+						minPeerDown = ep.DownBwKbps
+						havePeer = true
+					}
 				}
 			}
 

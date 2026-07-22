@@ -96,10 +96,11 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 				latency = bp.Raw.Mean
 			}
 			row.Entries = append(row.Entries, webui.LatencyCellJSON{
-				Dst:     dst.Hex(),
-				Latency: latency,
-				AF:      string(bp.AF),
-				Channel: string(bp.Channel),
+				Dst:         dst.Hex(),
+				Latency:     latency,
+				AF:          string(bp.AF),
+				Channel:     string(bp.Channel),
+				PeerChannel: string(bp.PeerChannel),
 			})
 		}
 		snap.LatencyMatrix = append(snap.LatencyMatrix, row)
@@ -110,10 +111,11 @@ func (c *Controller) buildStateSnapshot() *webui.StateSnapshot {
 		row := webui.RouteMatrixJSON{Src: src.Hex()}
 		for dst, entry := range dsts {
 			row.Entries = append(row.Entries, webui.RouteMatrixCellJSON{
-				Dst:     dst.Hex(),
-				NextHop: entry.NextHop.Hex(),
-				AF:      string(entry.AF),
-				Channel: string(entry.Channel),
+				Dst:         dst.Hex(),
+				NextHop:     entry.NextHop.Hex(),
+				AF:          string(entry.AF),
+				Channel:     string(entry.Channel),
+				PeerChannel: string(entry.PeerChannel),
 			})
 		}
 		snap.RouteMatrix = append(snap.RouteMatrix, row)

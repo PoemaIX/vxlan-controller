@@ -143,6 +143,19 @@ func (c *Client) forwardBroadcast(frame []byte) {
 		return
 	}
 
+	// Send to the address this conn actually dialed — the authority may have
+	// several addresses and only some are reachable from this channel.
+	if afc.CtrlAddr.IsValid() {
+		addr := &net.UDPAddr{
+			IP:   afc.CtrlAddr.Addr().AsSlice(),
+			Port: int(afc.CtrlAddr.Port()),
+		}
+		if err := protocol.WriteUDPPacket(afc.CommUDPConn, addr, afc.UDPSession, protocol.MsgMulticastForward, data); err != nil {
+			vlog.Errorf("[Client] broadcast: write UDP error: %v", err)
+		}
+		return
+	}
+	// Fallback: first configured address of the authority on this channel.
 	for _, ctrl := range cfgc.Controllers {
 		if types.ClientID(ctrl.PubKey) == *c.AuthorityCtrl {
 			addr := &net.UDPAddr{

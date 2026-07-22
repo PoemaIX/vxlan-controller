@@ -26,7 +26,12 @@ type ClientConfig struct {
 	AFSettings             map[types.AFName]map[types.ChannelName]*ClientChannelConfig
 	ChannelAdditionalCosts []ChannelAdditionalCost
 	InitTimeout            time.Duration
-	StatsInterval          time.Duration
+	// ControllerIdleTimeout: reading from a controller conn for longer than
+	// this without any inbound message treats the conn as dead (silent path
+	// failure sends no RST). The controller broadcasts probe requests every
+	// probe_interval_s, so anything well above that is safe.
+	ControllerIdleTimeout time.Duration
+	StatsInterval         time.Duration
 	ProbeWindowSize        int
 	AFSwitchCost           float64
 	NTPServers             []string
@@ -147,6 +152,9 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 	}
 
 	// Duration fields
+	if err := trackedSetDuration(&cfg.ControllerIdleTimeout, m, "controller_idle_timeout", time.Second, dt); err != nil {
+		return nil, nil, err
+	}
 	if err := trackedSetDuration(&cfg.InitTimeout, m, "init_timeout", time.Second, dt); err != nil {
 		return nil, nil, err
 	}

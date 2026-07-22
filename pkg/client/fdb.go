@@ -3,6 +3,9 @@ package client
 import (
 	"bytes"
 	"net"
+	"os/exec"
+	"strconv"
+	"strings"
 
 	"vxlan-controller/pkg/types"
 	"vxlan-controller/pkg/vlog"
@@ -18,6 +21,10 @@ type fdbKey struct {
 type fdbEntry struct {
 	DevName string
 	DstIP   net.IP
+	// DstPort overrides the local vxlan device's default dstport for this
+	// entry. Non-zero when the nexthop's channel advertises a different
+	// vxlan_dst_port than our local device (cross-channel pairs).
+	DstPort uint16
 }
 
 // fdbReconcileLoop watches for RouteMatrix/RouteTable changes and updates kernel FDB.
@@ -54,6 +61,16 @@ func (c *Client) reconcileFDB() {
 
 	view := cc.State
 
+	// A freshly restarted controller pushes a state whose RouteMatrix hasn't
+	// been computed yet (the first probe cycle takes a few seconds). Wiping
+	// the FDB against that transient empty matrix would turn a seamless
+	// controller restart into a data-plane outage — keep the last known
+	// entries until a computed matrix arrives.
+	if len(view.RouteMatrix) == 0 && len(c.CurrentFDB) > 0 {
+		vlog.Debugf("[Client] FDB reconcile: route matrix empty (controller warming up), keeping %d existing entries", len(c.CurrentFDB))
+		return
+	}
+
 	vlog.Debugf("[Client] FDB reconcile: RouteMatrix=%d rows, RouteTable=%d entries, Clients=%d",
 		len(view.RouteMatrix), len(view.RouteTable), len(view.Clients))
 
@@ -77,7 +94,7 @@ func (c *Client) reconcileFDB() {
 	// Log my routes for debugging
 	if myRoutes, ok := view.RouteMatrix[c.ClientID]; ok {
 		for dst, re := range myRoutes {
-			vlog.Verbosef("[Client] FDB route: me -> %s nextHop=%s af=%s channel=%s", nameOf(dst), nameOf(re.NextHop), re.AF, re.Channel)
+			vlog.Verbosef("[Client] FDB route: me -> %s nextHop=%s af=%s channel=%s>%s", nameOf(dst), nameOf(re.NextHop), re.AF, re.Channel, re.PeerChannel)
 		}
 	} else {
 		vlog.Verbosef("[Client] FDB route: no routes for my ID %s in RouteMatrix", c.ClientID.Hex()[:8])
@@ -118,9 +135,9 @@ func (c *Client) reconcileFDB() {
 			vlog.Verbosef("[Client] FDB skip %s: nexthop %s has no endpoint for AF %s", macStr, nameOf(routeEntry.NextHop), routeEntry.AF)
 			continue
 		}
-		ep, ok := epChans[routeEntry.Channel]
+		ep, ok := epChans[peerChannelOf(routeEntry)]
 		if !ok {
-			vlog.Verbosef("[Client] FDB skip %s: nexthop %s has no endpoint for AF=%s channel=%s", macStr, nameOf(routeEntry.NextHop), routeEntry.AF, routeEntry.Channel)
+			vlog.Verbosef("[Client] FDB skip %s: nexthop %s has no endpoint for AF=%s channel=%s", macStr, nameOf(routeEntry.NextHop), routeEntry.AF, peerChannelOf(routeEntry))
 			continue
 		}
 
@@ -140,6 +157,7 @@ func (c *Client) reconcileFDB() {
 		desiredFDB[key] = fdbEntry{
 			DevName: vxlanDev.Name,
 			DstIP:   ep.IP.AsSlice(),
+			DstPort: c.fdbDstPort(routeEntry, ep),
 		}
 	}
 
@@ -177,7 +195,7 @@ func (c *Client) reconcileFDB() {
 		if !ok {
 			continue
 		}
-		ep, ok := epChans[routeEntry.Channel]
+		ep, ok := epChans[peerChannelOf(routeEntry)]
 		if !ok {
 			continue
 		}
@@ -200,6 +218,7 @@ func (c *Client) reconcileFDB() {
 				desiredFDB[key] = fdbEntry{
 					DevName: vxlanDev.Name,
 					DstIP:   ep.IP.AsSlice(),
+					DstPort: c.fdbDstPort(routeEntry, ep),
 				}
 			}
 		}
@@ -209,7 +228,7 @@ func (c *Client) reconcileFDB() {
 	// Delete entries no longer needed
 	for key, entry := range c.CurrentFDB {
 		desired, ok := desiredFDB[key]
-		if !ok || desired.DevName != entry.DevName || !desired.DstIP.Equal(entry.DstIP) {
+		if !ok || desired.DevName != entry.DevName || !desired.DstIP.Equal(entry.DstIP) || desired.DstPort != entry.DstPort {
 			c.deleteFDBEntry(key, entry)
 		}
 	}
@@ -217,7 +236,7 @@ func (c *Client) reconcileFDB() {
 	// Add/update entries
 	for key, entry := range desiredFDB {
 		current, ok := c.CurrentFDB[key]
-		if !ok || current.DevName != entry.DevName || !current.DstIP.Equal(entry.DstIP) {
+		if !ok || current.DevName != entry.DevName || !current.DstIP.Equal(entry.DstIP) || current.DstPort != entry.DstPort {
 			if ok {
 				c.deleteFDBEntry(key, current)
 			}
@@ -226,6 +245,32 @@ func (c *Client) reconcileFDB() {
 	}
 
 	c.CurrentFDB = desiredFDB
+}
+
+// fdbDstPort returns the per-entry dstport override for an FDB entry toward
+// ep, or 0 when the nexthop channel's vxlan_dst_port matches our local
+// device's default (no override needed). Must be called with c.mu held.
+func (c *Client) fdbDstPort(re *types.RouteEntry, ep *types.Endpoint) uint16 {
+	if ep.VxlanDstPort == 0 {
+		return 0
+	}
+	if chans, ok := c.Config.AFSettings[re.AF]; ok {
+		if cc, ok := chans[re.Channel]; ok && cc.VxlanDstPort == ep.VxlanDstPort {
+			return 0
+		}
+	}
+	return ep.VxlanDstPort
+}
+
+// peerChannelOf returns the channel to look up on the nexthop's endpoints.
+// Local device selection keeps using RouteEntry.Channel; the dst IP must come
+// from the nexthop side of the pair. Empty PeerChannel (old controller) falls
+// back to the local channel name.
+func peerChannelOf(re *types.RouteEntry) types.ChannelName {
+	if re.PeerChannel != "" {
+		return re.PeerChannel
+	}
+	return re.Channel
 }
 
 func (c *Client) selectRouteOwner(rtEntry *types.RouteTableEntry, view *ControllerView) *types.ClientID {
@@ -292,16 +337,26 @@ func (c *Client) addFDBEntry(key fdbKey, entry fdbEntry) {
 	linkIdx := link.Attrs().Index
 
 	// self: tells vxlan device to encapsulate to dst IP (NUD_PERMANENT)
-	selfNeigh := &netlink.Neigh{
-		LinkIndex:    linkIdx,
-		Family:       unix.AF_BRIDGE,
-		State:        netlink.NUD_PERMANENT,
-		Flags:        netlink.NTF_SELF,
-		HardwareAddr: mac,
-		IP:           entry.DstIP,
-	}
-	if err := netlink.NeighAppend(selfNeigh); err != nil {
-		vlog.Errorf("[Client] FDB self append %s -> %s via %s: %v", key.MAC, entry.DstIP, entry.DevName, err)
+	if entry.DstPort != 0 {
+		// Per-entry dstport override (nexthop channel listens on a different
+		// vxlan port). netlink.Neigh can't carry NDA_PORT — use iproute2.
+		out, err := exec.Command("bridge", "fdb", "append", key.MAC, "dev", entry.DevName,
+			"self", "permanent", "dst", entry.DstIP.String(), "port", strconv.Itoa(int(entry.DstPort))).CombinedOutput()
+		if err != nil {
+			vlog.Errorf("[Client] FDB self append %s -> %s port %d via %s: %v: %s", key.MAC, entry.DstIP, entry.DstPort, entry.DevName, err, strings.TrimSpace(string(out)))
+		}
+	} else {
+		selfNeigh := &netlink.Neigh{
+			LinkIndex:    linkIdx,
+			Family:       unix.AF_BRIDGE,
+			State:        netlink.NUD_PERMANENT,
+			Flags:        netlink.NTF_SELF,
+			HardwareAddr: mac,
+			IP:           entry.DstIP,
+		}
+		if err := netlink.NeighAppend(selfNeigh); err != nil {
+			vlog.Errorf("[Client] FDB self append %s -> %s via %s: %v", key.MAC, entry.DstIP, entry.DevName, err)
+		}
 	}
 
 	// master: tells bridge to forward to vxlan port (avoids unknown unicast flooding).
@@ -362,6 +417,44 @@ func (c *Client) deleteFDBEntriesForMACOnLink(devName string, mac net.HardwareAd
 		}
 		if err := netlink.NeighDel(&n); err != nil {
 			vlog.Warnf("[Client] FDB delete %s on %s: %v", mac, devName, err)
+		}
+	}
+
+	c.purgeFDBPortedRemotes(devName, mac)
+}
+
+// purgeFDBPortedRemotes removes vxlan fdb remotes for mac on devName that
+// carry a per-entry dstport override. The kernel only deletes a remote when
+// (dst, port) match exactly, and netlink.Neigh can't express NDA_PORT, so
+// NeighDel silently misses these — parse `bridge fdb show` and delete with
+// the full (dst, port) tuple via iproute2.
+func (c *Client) purgeFDBPortedRemotes(devName string, mac net.HardwareAddr) {
+	out, err := exec.Command("bridge", "fdb", "show", "dev", devName).Output()
+	if err != nil {
+		return
+	}
+	macStr := mac.String()
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != macStr {
+			continue
+		}
+		var dst, port string
+		for i := 0; i+1 < len(fields); i++ {
+			switch fields[i] {
+			case "dst":
+				dst = fields[i+1]
+			case "port":
+				port = fields[i+1]
+			}
+		}
+		if dst == "" || port == "" {
+			continue // portless entries are handled by NeighDel
+		}
+		delOut, err := exec.Command("bridge", "fdb", "del", macStr, "dev", devName,
+			"self", "dst", dst, "port", port).CombinedOutput()
+		if err != nil {
+			vlog.Warnf("[Client] FDB ported delete %s dst %s port %s on %s: %v: %s", macStr, dst, port, devName, err, strings.TrimSpace(string(delOut)))
 		}
 	}
 }

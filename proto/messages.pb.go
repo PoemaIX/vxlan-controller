@@ -1067,13 +1067,17 @@ func (x *RouteMatrixRow) GetCells() []*RouteMatrixCell {
 }
 
 type RouteMatrixCell struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DstClientId   []byte                 `protobuf:"bytes,1,opt,name=dst_client_id,json=dstClientId,proto3" json:"dst_client_id,omitempty"`
-	NexthopId     []byte                 `protobuf:"bytes,2,opt,name=nexthop_id,json=nexthopId,proto3" json:"nexthop_id,omitempty"`
-	AfName        string                 `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
-	ChannelName   string                 `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	DstClientId []byte                 `protobuf:"bytes,1,opt,name=dst_client_id,json=dstClientId,proto3" json:"dst_client_id,omitempty"`
+	NexthopId   []byte                 `protobuf:"bytes,2,opt,name=nexthop_id,json=nexthopId,proto3" json:"nexthop_id,omitempty"`
+	AfName      string                 `protobuf:"bytes,3,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName string                 `protobuf:"bytes,4,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"` // sender-side (local) channel
+	// Channel on the nexthop side. Channels are per-node uplink labels, so the
+	// two ends of an edge may use different names. Empty = same as channel_name
+	// (wire compat with pre-pairing peers).
+	PeerChannelName string `protobuf:"bytes,5,opt,name=peer_channel_name,json=peerChannelName,proto3" json:"peer_channel_name,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RouteMatrixCell) Reset() {
@@ -1130,6 +1134,13 @@ func (x *RouteMatrixCell) GetAfName() string {
 func (x *RouteMatrixCell) GetChannelName() string {
 	if x != nil {
 		return x.ChannelName
+	}
+	return ""
+}
+
+func (x *RouteMatrixCell) GetPeerChannelName() string {
+	if x != nil {
+		return x.PeerChannelName
 	}
 	return ""
 }
@@ -1377,19 +1388,23 @@ func (x *ProbeResultEntry) GetDebouncedAfResults() []*AFProbeResult {
 }
 
 type AFProbeResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AfName        string                 `protobuf:"bytes,9,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
-	ChannelName   string                 `protobuf:"bytes,10,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"`
-	LatencyMean   float64                `protobuf:"fixed64,1,opt,name=latency_mean,json=latencyMean,proto3" json:"latency_mean,omitempty"`
-	LatencyStd    float64                `protobuf:"fixed64,2,opt,name=latency_std,json=latencyStd,proto3" json:"latency_std,omitempty"`
-	PacketLoss    float64                `protobuf:"fixed64,3,opt,name=packet_loss,json=packetLoss,proto3" json:"packet_loss,omitempty"`
-	Priority      int32                  `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
-	ForwardCost   float64                `protobuf:"fixed64,5,opt,name=forward_cost,json=forwardCost,proto3" json:"forward_cost,omitempty"` // cost of transiting through this node via this (af, channel)
-	SwitchCost    float64                `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`    // 0 for preferred (af, channel), >0 for others (hysteresis)
-	FinalCost     float64                `protobuf:"fixed64,7,opt,name=final_cost,json=finalCost,proto3" json:"final_cost,omitempty"`       // quality_cost + forward_cost + switch_cost
-	QualityCost   float64                `protobuf:"fixed64,8,opt,name=quality_cost,json=qualityCost,proto3" json:"quality_cost,omitempty"` // abstract quality metric (currently = latency_mean)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	AfName      string                 `protobuf:"bytes,9,opt,name=af_name,json=afName,proto3" json:"af_name,omitempty"`
+	ChannelName string                 `protobuf:"bytes,10,opt,name=channel_name,json=channelName,proto3" json:"channel_name,omitempty"` // prober-side (local) channel
+	// Probed peer's channel. Cross-ISP pairs are probed independently, so one
+	// (af, channel_name) can appear with several peer_channel_name values.
+	// Empty = same as channel_name (wire compat).
+	PeerChannelName string  `protobuf:"bytes,11,opt,name=peer_channel_name,json=peerChannelName,proto3" json:"peer_channel_name,omitempty"`
+	LatencyMean     float64 `protobuf:"fixed64,1,opt,name=latency_mean,json=latencyMean,proto3" json:"latency_mean,omitempty"`
+	LatencyStd      float64 `protobuf:"fixed64,2,opt,name=latency_std,json=latencyStd,proto3" json:"latency_std,omitempty"`
+	PacketLoss      float64 `protobuf:"fixed64,3,opt,name=packet_loss,json=packetLoss,proto3" json:"packet_loss,omitempty"`
+	Priority        int32   `protobuf:"varint,4,opt,name=priority,proto3" json:"priority,omitempty"`
+	ForwardCost     float64 `protobuf:"fixed64,5,opt,name=forward_cost,json=forwardCost,proto3" json:"forward_cost,omitempty"` // cost of transiting through this node via this (af, channel)
+	SwitchCost      float64 `protobuf:"fixed64,6,opt,name=switch_cost,json=switchCost,proto3" json:"switch_cost,omitempty"`    // 0 for preferred (af, channel), >0 for others (hysteresis)
+	FinalCost       float64 `protobuf:"fixed64,7,opt,name=final_cost,json=finalCost,proto3" json:"final_cost,omitempty"`       // quality_cost + forward_cost + switch_cost
+	QualityCost     float64 `protobuf:"fixed64,8,opt,name=quality_cost,json=qualityCost,proto3" json:"quality_cost,omitempty"` // abstract quality metric (currently = latency_mean)
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *AFProbeResult) Reset() {
@@ -1432,6 +1447,13 @@ func (x *AFProbeResult) GetAfName() string {
 func (x *AFProbeResult) GetChannelName() string {
 	if x != nil {
 		return x.ChannelName
+	}
+	return ""
+}
+
+func (x *AFProbeResult) GetPeerChannelName() string {
+	if x != nil {
+		return x.PeerChannelName
 	}
 	return ""
 }
@@ -1494,11 +1516,17 @@ func (x *AFProbeResult) GetQualityCost() float64 {
 
 // Probe channel messages (serialized, then encrypted)
 type ProbeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ProbeId       uint64                 `protobuf:"varint,1,opt,name=probe_id,json=probeId,proto3" json:"probe_id,omitempty"`
-	SrcTimestamp  int64                  `protobuf:"varint,2,opt,name=src_timestamp,json=srcTimestamp,proto3" json:"src_timestamp,omitempty"` // unix nano
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ProbeId      uint64                 `protobuf:"varint,1,opt,name=probe_id,json=probeId,proto3" json:"probe_id,omitempty"`
+	SrcTimestamp int64                  `protobuf:"varint,2,opt,name=src_timestamp,json=srcTimestamp,proto3" json:"src_timestamp,omitempty"` // unix nano
+	// Channel pair this probe measures: the sender's local channel and the
+	// destination channel it targets (as named by the receiver). Echoed back in
+	// ProbeResponse so the sender can attribute the reply to the right pair —
+	// the reply's source address alone can't distinguish peer channels.
+	SrcChannelName string `protobuf:"bytes,3,opt,name=src_channel_name,json=srcChannelName,proto3" json:"src_channel_name,omitempty"`
+	DstChannelName string `protobuf:"bytes,4,opt,name=dst_channel_name,json=dstChannelName,proto3" json:"dst_channel_name,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ProbeRequest) Reset() {
@@ -1545,13 +1573,29 @@ func (x *ProbeRequest) GetSrcTimestamp() int64 {
 	return 0
 }
 
+func (x *ProbeRequest) GetSrcChannelName() string {
+	if x != nil {
+		return x.SrcChannelName
+	}
+	return ""
+}
+
+func (x *ProbeRequest) GetDstChannelName() string {
+	if x != nil {
+		return x.DstChannelName
+	}
+	return ""
+}
+
 type ProbeResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ProbeId       uint64                 `protobuf:"varint,1,opt,name=probe_id,json=probeId,proto3" json:"probe_id,omitempty"`
-	DstTimestamp  int64                  `protobuf:"varint,2,opt,name=dst_timestamp,json=dstTimestamp,proto3" json:"dst_timestamp,omitempty"` // unix nano
-	SrcTimestamp  int64                  `protobuf:"varint,3,opt,name=src_timestamp,json=srcTimestamp,proto3" json:"src_timestamp,omitempty"` // echo back sender's src_timestamp
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ProbeId        uint64                 `protobuf:"varint,1,opt,name=probe_id,json=probeId,proto3" json:"probe_id,omitempty"`
+	DstTimestamp   int64                  `protobuf:"varint,2,opt,name=dst_timestamp,json=dstTimestamp,proto3" json:"dst_timestamp,omitempty"`        // unix nano
+	SrcTimestamp   int64                  `protobuf:"varint,3,opt,name=src_timestamp,json=srcTimestamp,proto3" json:"src_timestamp,omitempty"`        // echo back sender's src_timestamp
+	SrcChannelName string                 `protobuf:"bytes,4,opt,name=src_channel_name,json=srcChannelName,proto3" json:"src_channel_name,omitempty"` // echo of ProbeRequest.src_channel_name
+	DstChannelName string                 `protobuf:"bytes,5,opt,name=dst_channel_name,json=dstChannelName,proto3" json:"dst_channel_name,omitempty"` // echo of ProbeRequest.dst_channel_name
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ProbeResponse) Reset() {
@@ -1603,6 +1647,20 @@ func (x *ProbeResponse) GetSrcTimestamp() int64 {
 		return x.SrcTimestamp
 	}
 	return 0
+}
+
+func (x *ProbeResponse) GetSrcChannelName() string {
+	if x != nil {
+		return x.SrcChannelName
+	}
+	return ""
+}
+
+func (x *ProbeResponse) GetDstChannelName() string {
+	if x != nil {
+		return x.DstChannelName
+	}
+	return ""
 }
 
 // Client → Controller: periodic multicast stats
@@ -2051,13 +2109,14 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\x04rows\x18\x01 \x03(\v2\x1f.vxlancontroller.RouteMatrixRowR\x04rows\"l\n" +
 	"\x0eRouteMatrixRow\x12\"\n" +
 	"\rsrc_client_id\x18\x01 \x01(\fR\vsrcClientId\x126\n" +
-	"\x05cells\x18\x02 \x03(\v2 .vxlancontroller.RouteMatrixCellR\x05cells\"\x90\x01\n" +
+	"\x05cells\x18\x02 \x03(\v2 .vxlancontroller.RouteMatrixCellR\x05cells\"\xbc\x01\n" +
 	"\x0fRouteMatrixCell\x12\"\n" +
 	"\rdst_client_id\x18\x01 \x01(\fR\vdstClientId\x12\x1d\n" +
 	"\n" +
 	"nexthop_id\x18\x02 \x01(\fR\tnexthopId\x12\x17\n" +
 	"\aaf_name\x18\x03 \x01(\tR\x06afName\x12!\n" +
-	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\"\xbe\x01\n" +
+	"\fchannel_name\x18\x04 \x01(\tR\vchannelName\x12*\n" +
+	"\x11peer_channel_name\x18\x05 \x01(\tR\x0fpeerChannelName\"\xbe\x01\n" +
 	"\x14RouteTableEntryProto\x12\x10\n" +
 	"\x03mac\x18\x01 \x01(\fR\x03mac\x12\x0e\n" +
 	"\x02ip\x18\x02 \x01(\fR\x02ip\x12I\n" +
@@ -2081,11 +2140,12 @@ const file_proto_messages_proto_rawDesc = "" +
 	"\x10ProbeResultEntry\x12=\n" +
 	"\n" +
 	"af_results\x18\x01 \x03(\v2\x1e.vxlancontroller.AFProbeResultR\tafResults\x12P\n" +
-	"\x14debounced_af_results\x18\x02 \x03(\v2\x1e.vxlancontroller.AFProbeResultR\x12debouncedAfResults\"\xd2\x02\n" +
+	"\x14debounced_af_results\x18\x02 \x03(\v2\x1e.vxlancontroller.AFProbeResultR\x12debouncedAfResults\"\xfe\x02\n" +
 	"\rAFProbeResult\x12\x17\n" +
 	"\aaf_name\x18\t \x01(\tR\x06afName\x12!\n" +
 	"\fchannel_name\x18\n" +
-	" \x01(\tR\vchannelName\x12!\n" +
+	" \x01(\tR\vchannelName\x12*\n" +
+	"\x11peer_channel_name\x18\v \x01(\tR\x0fpeerChannelName\x12!\n" +
 	"\flatency_mean\x18\x01 \x01(\x01R\vlatencyMean\x12\x1f\n" +
 	"\vlatency_std\x18\x02 \x01(\x01R\n" +
 	"latencyStd\x12\x1f\n" +
@@ -2097,14 +2157,18 @@ const file_proto_messages_proto_rawDesc = "" +
 	"switchCost\x12\x1d\n" +
 	"\n" +
 	"final_cost\x18\a \x01(\x01R\tfinalCost\x12!\n" +
-	"\fquality_cost\x18\b \x01(\x01R\vqualityCost\"N\n" +
+	"\fquality_cost\x18\b \x01(\x01R\vqualityCost\"\xa2\x01\n" +
 	"\fProbeRequest\x12\x19\n" +
 	"\bprobe_id\x18\x01 \x01(\x04R\aprobeId\x12#\n" +
-	"\rsrc_timestamp\x18\x02 \x01(\x03R\fsrcTimestamp\"t\n" +
+	"\rsrc_timestamp\x18\x02 \x01(\x03R\fsrcTimestamp\x12(\n" +
+	"\x10src_channel_name\x18\x03 \x01(\tR\x0esrcChannelName\x12(\n" +
+	"\x10dst_channel_name\x18\x04 \x01(\tR\x0edstChannelName\"\xc8\x01\n" +
 	"\rProbeResponse\x12\x19\n" +
 	"\bprobe_id\x18\x01 \x01(\x04R\aprobeId\x12#\n" +
 	"\rdst_timestamp\x18\x02 \x01(\x03R\fdstTimestamp\x12#\n" +
-	"\rsrc_timestamp\x18\x03 \x01(\x03R\fsrcTimestamp\"O\n" +
+	"\rsrc_timestamp\x18\x03 \x01(\x03R\fsrcTimestamp\x12(\n" +
+	"\x10src_channel_name\x18\x04 \x01(\tR\x0esrcChannelName\x12(\n" +
+	"\x10dst_channel_name\x18\x05 \x01(\tR\x0edstChannelName\"O\n" +
 	"\x10McastStatsReport\x12;\n" +
 	"\tmac_stats\x18\x01 \x03(\v2\x1e.vxlancontroller.MACMcastStatsR\bmacStats\"\xf0\x01\n" +
 	"\rMACMcastStats\x12\x10\n" +
