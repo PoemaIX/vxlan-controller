@@ -88,6 +88,18 @@ if grep -c "vxlan-v4-ISP2" "$TMPDIR/siteA.client.yaml" | grep -q "^[1-9]"; then
 fi
 
 echo ""
+echo "=== verify per-channel unique vxlan ports (kernel refuses shared VNI+port) ==="
+f="$TMPDIR/siteA.client.yaml"
+ports=$(grep "vxlan_dst_port:" "$f" | awk '{print $2}' | sort)
+uniq_ports=$(echo "$ports" | uniq | wc -l)
+total_ports=$(echo "$ports" | wc -l)
+if [ "$uniq_ports" != "$total_ports" ]; then
+    echo "  FAIL: siteA has duplicate vxlan_dst_port across channels: $ports"
+    exit 1
+fi
+echo "  OK: siteA channels use distinct vxlan ports ($(echo $ports))"
+
+echo ""
 echo "=== Per-channel controller spec (node/channel) ==="
 cat > "$TMPDIR/topology2.yaml" << 'YAML'
 vxlan_dst_port: 4789

@@ -411,11 +411,19 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 	// Precompute deterministic vxlan_name per (af, channel) for this node.
 	vxlanNames := buildVxlanNames(ag.VxlanNamePrefix, ag.Nodes[name])
 
+	// The kernel refuses two local vxlan devices sharing (VNI, dst_port), so
+	// each (af, channel) gets a locally-unique dst_port (base + offset in
+	// sorted order). Peers learn every channel's port from the endpoint
+	// advertisement, and the FDB writes per-entry port overrides — ports only
+	// need to be unique per node, not aligned across nodes.
+	portOffsets := buildPortOffsets(ag.Nodes[name])
+
 	// AF settings from this node's (af, channel) pairs
 	cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig)
 	for afName, chans := range ag.Nodes[name] {
 		inner := make(map[types.ChannelName]*ClientChannelConfig, len(chans))
 		for chName, af := range chans {
+			off := portOffsets[types.AFName(afName)][chName]
 			cc := &ClientChannelConfig{
 				AF:                types.AFName(afName),
 				Channel:           chName,
@@ -424,11 +432,17 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 				VxlanName:         vxlanNames[types.AFName(afName)][chName],
 				VxlanVNI:          ag.VxlanVNI,
 				VxlanMTU:          ag.VxlanMTU,
-				VxlanDstPort:      ag.VxlanDstPort,
+				VxlanDstPort:      ag.VxlanDstPort + off,
 				VxlanSrcPortStart: ag.VxlanSrcPortStart,
 				VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
 				Priority:          ag.Priority,
 				ForwardCost:       ag.ForwardCost,
+			}
+			if ag.VxlanSrcPortStart == ag.VxlanSrcPortEnd && ag.VxlanSrcPortStart != 0 {
+				// Pinned source port (NAT friendliness): follow the device's
+				// own dst_port so each device keeps src == dst symmetry.
+				cc.VxlanSrcPortStart = ag.VxlanSrcPortStart + off
+				cc.VxlanSrcPortEnd = ag.VxlanSrcPortEnd + off
 			}
 			if af.IsAutoIP() {
 				cc.AutoIPInterface = af.Bind
@@ -500,6 +514,35 @@ func formatAddrPort(host string, port uint16) string {
 
 // MaxIfnameLen is the Linux IFNAMSIZ-1 (15 char limit for interface names).
 const MaxIfnameLen = 15
+
+// buildPortOffsets assigns each (af, channel) of one node a deterministic
+// offset (0, 1, 2, ... over the sorted af then channel order) used to derive
+// locally-unique vxlan ports.
+func buildPortOffsets(afs map[string]AutogenAFChannels) map[types.AFName]map[types.ChannelName]uint16 {
+	var afNames []string
+	for afName := range afs {
+		afNames = append(afNames, afName)
+	}
+	sort.Strings(afNames)
+
+	result := make(map[types.AFName]map[types.ChannelName]uint16, len(afs))
+	var off uint16
+	for _, afName := range afNames {
+		chans := afs[afName]
+		chNames := make([]types.ChannelName, 0, len(chans))
+		for ch := range chans {
+			chNames = append(chNames, ch)
+		}
+		sort.Slice(chNames, func(i, j int) bool { return chNames[i] < chNames[j] })
+		inner := make(map[types.ChannelName]uint16, len(chNames))
+		for _, ch := range chNames {
+			inner[ch] = off
+			off++
+		}
+		result[types.AFName(afName)] = inner
+	}
+	return result
+}
 
 // buildVxlanNames produces a deterministic, IFNAMSIZ-safe vxlan_name for every
 // (af, channel) on a single node.
