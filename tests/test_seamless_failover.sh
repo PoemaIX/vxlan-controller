@@ -136,7 +136,15 @@ else
         ip netns exec node-1 tc qdisc add dev "$slow_dev" root netem delay 80ms
     assert_ping_loss "no loss across latency-driven switch" 10
 
+    # Switch timing = debounce window + topology push + FDB reconcile; under
+    # full-suite load that can outlast the ping window — wait, don't snapshot.
+    switch_deadline=$((SECONDS + 45))
     new_dst=$(get_fdb_dst 1 "$LEAF2_MAC")
+    while [ "$SECONDS" -lt "$switch_deadline" ]; do
+        new_dst=$(get_fdb_dst 1 "$LEAF2_MAC")
+        [ -n "$new_dst" ] && [ "$new_dst" != "$cur_dst" ] && break
+        sleep 3
+    done
     test_total=$((test_total + 1))
     if [ -n "$new_dst" ] && [ "$new_dst" != "$cur_dst" ]; then
         echo "  TEST: route switched off the slowed path ... PASS ($cur_dst -> $new_dst)"
