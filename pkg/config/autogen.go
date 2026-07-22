@@ -413,17 +413,18 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 
 	// The kernel refuses two local vxlan devices sharing (VNI, dst_port), so
 	// each (af, channel) gets a locally-unique dst_port (base + offset in
-	// sorted order). Peers learn every channel's port from the endpoint
-	// advertisement, and the FDB writes per-entry port overrides — ports only
-	// need to be unique per node, not aligned across nodes.
-	portOffsets := buildPortOffsets(ag.Nodes[name])
+	// sorted order, skipping the probe/communication ports). Peers learn
+	// every channel's port from the endpoint advertisement, and the FDB
+	// writes per-entry port overrides — ports only need to be unique per
+	// node, not aligned across nodes.
+	vxlanPorts := buildVxlanPorts(ag.Nodes[name], ag.VxlanDstPort, ag.ProbePort, ag.CommunicationPort)
 
 	// AF settings from this node's (af, channel) pairs
 	cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ClientChannelConfig)
 	for afName, chans := range ag.Nodes[name] {
 		inner := make(map[types.ChannelName]*ClientChannelConfig, len(chans))
 		for chName, af := range chans {
-			off := portOffsets[types.AFName(afName)][chName]
+			devPort := vxlanPorts[types.AFName(afName)][chName]
 			cc := &ClientChannelConfig{
 				AF:                types.AFName(afName),
 				Channel:           chName,
@@ -432,7 +433,7 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 				VxlanName:         vxlanNames[types.AFName(afName)][chName],
 				VxlanVNI:          ag.VxlanVNI,
 				VxlanMTU:          ag.VxlanMTU,
-				VxlanDstPort:      ag.VxlanDstPort + off,
+				VxlanDstPort:      devPort,
 				VxlanSrcPortStart: ag.VxlanSrcPortStart,
 				VxlanSrcPortEnd:   ag.VxlanSrcPortEnd,
 				Priority:          ag.Priority,
@@ -441,8 +442,8 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			if ag.VxlanSrcPortStart == ag.VxlanSrcPortEnd && ag.VxlanSrcPortStart != 0 {
 				// Pinned source port (NAT friendliness): follow the device's
 				// own dst_port so each device keeps src == dst symmetry.
-				cc.VxlanSrcPortStart = ag.VxlanSrcPortStart + off
-				cc.VxlanSrcPortEnd = ag.VxlanSrcPortEnd + off
+				cc.VxlanSrcPortStart = devPort
+				cc.VxlanSrcPortEnd = devPort
 			}
 			if af.IsAutoIP() {
 				cc.AutoIPInterface = af.Bind
@@ -515,10 +516,21 @@ func formatAddrPort(host string, port uint16) string {
 // MaxIfnameLen is the Linux IFNAMSIZ-1 (15 char limit for interface names).
 const MaxIfnameLen = 15
 
-// buildPortOffsets assigns each (af, channel) of one node a deterministic
-// offset (0, 1, 2, ... over the sorted af then channel order) used to derive
-// locally-unique vxlan ports.
-func buildPortOffsets(afs map[string]AutogenAFChannels) map[types.AFName]map[types.ChannelName]uint16 {
+// buildVxlanPorts assigns each (af, channel) of one node a deterministic,
+// locally-unique vxlan dst_port: base, base+1, ... over the sorted af then
+// channel order, skipping reserved ports (probe/communication) — the kernel
+// binds vxlan sockets on the wildcard address, so a vxlan port equal to the
+// probe port would steal the probe listener's bind.
+func buildVxlanPorts(afs map[string]AutogenAFChannels, base uint16, reserved ...uint16) map[types.AFName]map[types.ChannelName]uint16 {
+	isReserved := func(p uint16) bool {
+		for _, r := range reserved {
+			if p == r {
+				return true
+			}
+		}
+		return false
+	}
+
 	var afNames []string
 	for afName := range afs {
 		afNames = append(afNames, afName)
@@ -526,7 +538,15 @@ func buildPortOffsets(afs map[string]AutogenAFChannels) map[types.AFName]map[typ
 	sort.Strings(afNames)
 
 	result := make(map[types.AFName]map[types.ChannelName]uint16, len(afs))
-	var off uint16
+	port := base
+	next := func() uint16 {
+		for isReserved(port) {
+			port++
+		}
+		p := port
+		port++
+		return p
+	}
 	for _, afName := range afNames {
 		chans := afs[afName]
 		chNames := make([]types.ChannelName, 0, len(chans))
@@ -536,8 +556,7 @@ func buildPortOffsets(afs map[string]AutogenAFChannels) map[types.AFName]map[typ
 		sort.Slice(chNames, func(i, j int) bool { return chNames[i] < chNames[j] })
 		inner := make(map[types.ChannelName]uint16, len(chNames))
 		for _, ch := range chNames {
-			inner[ch] = off
-			off++
+			inner[ch] = next()
 		}
 		result[types.AFName(afName)] = inner
 	}
