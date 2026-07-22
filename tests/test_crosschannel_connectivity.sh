@@ -116,7 +116,9 @@ private_key: "${privkey}"
 bridge_name: "${BRIDGE_NAME}"
 clamp_mss_to_mtu: false
 neigh_suppress: false
-vxlan_firewall: false
+# firewall ON: with per-node channel names the allowlist must be built
+# per-AF (any peer uplink), not by matching channel names.
+vxlan_firewall: true
 init_timeout: ${INIT_TIMEOUT}
 controller_idle_timeout: 12
 probe_window_size: 5

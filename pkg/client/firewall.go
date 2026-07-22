@@ -52,7 +52,7 @@ func (c *Client) syncFirewallPeers() {
 	}
 
 	c.mu.Lock()
-	peers := c.collectPeerIPsPerAFChannel()
+	peers := c.collectPeerIPsPerAF()
 	c.mu.Unlock()
 
 	tbl := c.fwTable()
@@ -64,8 +64,7 @@ func (c *Client) syncFirewallPeers() {
 			}
 			sn := setName(af, ch)
 			cmds = append(cmds, fmt.Sprintf("flush set inet %s %s", tbl, sn))
-			k := afChannelKey{AF: af, Channel: ch}
-			if ips, ok := peers[k]; ok && len(ips) > 0 {
+			if ips, ok := peers[af]; ok && len(ips) > 0 {
 				cmds = append(cmds, fmt.Sprintf("add element inet %s %s { %s }", tbl, sn, strings.Join(ips, ", ")))
 			}
 		}
@@ -92,7 +91,7 @@ func (c *Client) rebuildFirewallRules() {
 	}
 
 	c.mu.Lock()
-	peers := c.collectPeerIPsPerAFChannel()
+	peers := c.collectPeerIPsPerAF()
 	c.mu.Unlock()
 
 	nft := c.buildFirewallRuleset(peers)
@@ -114,10 +113,14 @@ func (c *Client) cleanupFirewall() {
 	vlog.Infof("[Firewall] VXLAN firewall cleaned up")
 }
 
-// collectPeerIPsPerAFChannel returns per-(af, channel) sorted lists of peer endpoint IPs.
+// collectPeerIPsPerAF returns per-AF sorted lists of ALL peer endpoint IPs.
+// Channel names are per-node labels and pairing is a full cross-product, so a
+// peer may legitimately send vxlan traffic to any of our channels from any of
+// its uplinks in the same AF — the allowlist must not be keyed by matching
+// channel names (that empties the sets whenever names differ between nodes).
 // Must be called with c.mu held.
-func (c *Client) collectPeerIPsPerAFChannel() map[afChannelKey][]string {
-	result := make(map[afChannelKey][]string)
+func (c *Client) collectPeerIPsPerAF() map[types.AFName][]string {
+	result := make(map[types.AFName][]string)
 
 	if c.AuthorityCtrl == nil {
 		return result
@@ -132,12 +135,11 @@ func (c *Client) collectPeerIPsPerAFChannel() map[afChannelKey][]string {
 			continue
 		}
 		for af, chans := range ci.Endpoints {
-			for ch, ep := range chans {
+			for _, ep := range chans {
 				if !ep.IP.IsValid() {
 					continue
 				}
-				k := afChannelKey{AF: af, Channel: ch}
-				result[k] = append(result[k], ep.IP.String())
+				result[af] = append(result[af], ep.IP.String())
 			}
 		}
 	}
@@ -159,7 +161,7 @@ func (c *Client) collectPeerIPsPerAFChannel() map[afChannelKey][]string {
 
 // buildFirewallRuleset generates a complete nftables ruleset for VXLAN source filtering.
 // Each (af, channel) gets its own set and rule, so multi-channel configs with different peers are isolated.
-func (c *Client) buildFirewallRuleset(peers map[afChannelKey][]string) string {
+func (c *Client) buildFirewallRuleset(peers map[types.AFName][]string) string {
 	var sb strings.Builder
 
 	tbl := c.fwTable()
@@ -188,8 +190,7 @@ func (c *Client) buildFirewallRuleset(peers map[afChannelKey][]string) string {
 
 			sb.WriteString(fmt.Sprintf("    set %s {\n", sn))
 			sb.WriteString(fmt.Sprintf("        type %s\n", addrType))
-			k := afChannelKey{AF: af, Channel: ch}
-			if ips, ok := peers[k]; ok && len(ips) > 0 {
+			if ips, ok := peers[af]; ok && len(ips) > 0 {
 				sb.WriteString(fmt.Sprintf("        elements = { %s }\n", strings.Join(ips, ", ")))
 			}
 			sb.WriteString("    }\n")
