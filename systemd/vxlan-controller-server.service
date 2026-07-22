@@ -1,0 +1,15 @@
+[Unit]
+Description=VXLAN overlay controller
+Documentation=https://github.com/PoemaIX/vxlan-controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vxlan-controller --mode controller --config /etc/vxlan-controller/controller.yaml
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

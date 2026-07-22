@@ -36,7 +36,11 @@ jobs:
         run: |
           suffix="${{ matrix.goarch }}"
           [ -n "${{ matrix.goarm }}" ] && suffix="${suffix}v${{ matrix.goarm }}"
-          version="${GITHUB_REF_NAME:-dev}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
           go build -trimpath -ldflags="-s -w -X main.Version=${version}" -o "vxlan-controller-${suffix}" ./cmd/vxlan-controller
 
       - name: Upload artifact
@@ -82,3 +86,48 @@ jobs:
           generate_release_notes: true
           make_latest: true
           files: release/*
+
+  # Rolling "dev" prerelease: every push to main moves the dev tag to HEAD
+  # and replaces the release assets, so `install.sh` (default channel: dev)
+  # always fetches the latest main build.
+  dev-release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, vet]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          for dir in artifacts/vxlan-controller-*/; do
+            cp "$dir"vxlan-controller-* release/
+          done
+          cd release && sha256sum vxlan-controller-* > checksums.txt
+
+      - name: Move dev tag to HEAD
+        run: |
+          git tag -f dev
+          git push -f origin dev
+
+      - name: Update dev prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short="${GITHUB_SHA::7}"
+          if ! gh release view dev >/dev/null 2>&1; then
+            gh release create dev --prerelease \
+              --title "Development build (${short})" \
+              --notes "Rolling build of main @ ${GITHUB_SHA}. Updated on every push."
+          else
+            gh release edit dev --prerelease \
+              --title "Development build (${short})" \
+              --notes "Rolling build of main @ ${GITHUB_SHA}. Updated on every push."
+          fi
+          gh release upload dev release/* --clobber

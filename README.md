@@ -43,6 +43,32 @@ FRR still lacks proper IPv6 VXLAN-EVPN support. This project provides a lightwei
 └─────────────────────┘
 ```
 
+## Install
+
+One-liner (downloads the binary from GitHub releases, installs the systemd
+units, creates `/etc/vxlan-controller/`; enables nothing — you do that after
+placing your config):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PoemaIX/vxlan-controller/main/install.sh | sh
+```
+
+By default it installs the rolling **dev** prerelease (rebuilt on every push
+to `main`). For a tagged version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PoemaIX/vxlan-controller/main/install.sh | VXLAN_RELEASE=v1.0.38 sh
+```
+
+Then put your config(s) at `/etc/vxlan-controller/client.yaml` (every node)
+and `/etc/vxlan-controller/controller.yaml` (controller nodes only), and
+enable what the node runs:
+
+```bash
+systemctl enable --now vxlan-controller-client
+systemctl enable --now vxlan-controller-server   # controller nodes only
+```
+
 ## Build
 
 Single binary, all modes:
