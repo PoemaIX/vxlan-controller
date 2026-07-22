@@ -294,6 +294,17 @@ func (c *Client) createTapInject() error {
 		return fmt.Errorf("set tap bridge_slave options: %v: %s", err, out)
 	}
 
+	// The broadcast relay taps ALL multicast off the bridge. With MLD/IGMP
+	// snooping active (bridge default) AND a querier present on the segment,
+	// the bridge only forwards group traffic to ports that joined — the tap
+	// never joins anything, so ND solicitations would stop reaching the
+	// relay. Mark the tap as a multicast router port (2 = permanent) so it
+	// always receives all multicast regardless of snooping state.
+	cmd = exec.Command("bridge", "link", "set", "dev", tapDeviceName, "mcast_router", "2")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		vlog.Warnf("[Client] set tap mcast_router: %v: %s", err, out)
+	}
+
 	if err := netlink.LinkSetUp(link); err != nil {
 		return fmt.Errorf("tap link up: %w", err)
 	}
