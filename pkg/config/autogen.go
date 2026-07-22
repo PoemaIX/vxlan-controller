@@ -209,6 +209,22 @@ func Autogen(path string) error {
 		return fmt.Errorf("parse topology: %w", err)
 	}
 
+	// Multi-uplink AFs need device binding: egress is destination-routed, so
+	// a bare bind IP cannot steer which uplink is used. Autoip channels get
+	// their interface as bind_device automatically.
+	for name, afs := range ag.Nodes {
+		for afName, chans := range afs {
+			if len(chans) < 2 {
+				continue
+			}
+			for chName, af := range chans {
+				if af.BindDevice == "" && !af.IsAutoIP() {
+					return fmt.Errorf("node %q af %s channel %s: an AF with multiple channels requires bind_device on every channel (bind IP alone cannot steer egress)", name, afName, chName)
+				}
+			}
+		}
+	}
+
 	// Parse and validate controller specs
 	allRoles := map[string]bool{}
 	specs := make([]controllerSpec, 0, len(ag.Controllers))
@@ -331,6 +347,9 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 				cc.BindAddr = netip.MustParseAddr(af.Bind)
 			}
 			cc.BindDevice = af.BindDevice
+			if cc.BindDevice == "" && af.IsAutoIP() && len(chans) > 1 {
+				cc.BindDevice = af.Bind
+			}
 			inner[chName] = cc
 		}
 		if len(inner) > 0 {
@@ -451,6 +470,9 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 				cc.BindAddr = netip.MustParseAddr(af.Bind)
 			}
 			cc.BindDevice = af.BindDevice
+			if cc.BindDevice == "" && af.IsAutoIP() && len(chans) > 1 {
+				cc.BindDevice = af.Bind
+			}
 
 			// Add controller endpoints selected for this AF. Channel names
 			// are per-node uplink labels, so a client channel can reach a

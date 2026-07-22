@@ -175,6 +175,9 @@ func LoadControllerConfig(path string) (*ControllerConfig, []DefaultApplied, err
 		}
 	}
 
+	if err := validateControllerBindDevices(cfg.AFSettings); err != nil {
+		return nil, nil, err
+	}
 	if err := validateControllerUniqueness(cfg.AFSettings); err != nil {
 		return nil, nil, err
 	}
@@ -319,6 +322,34 @@ func overlayControllerChannel(afName types.AFName, chName types.ChannelName, nod
 	}
 
 	return base, nil
+}
+
+// validateControllerBindDevices mirrors the client-side rule: an AF with more
+// than one enabled channel must pin every channel to a device (see
+// validateClientBindDevices for the rationale).
+func validateControllerBindDevices(afs map[types.AFName]map[types.ChannelName]*ControllerChannelConfig) error {
+	for af, chans := range afs {
+		enabled := 0
+		for _, cc := range chans {
+			if cc.Enable {
+				enabled++
+			}
+		}
+		if enabled < 2 {
+			continue
+		}
+		for ch, cc := range chans {
+			if !cc.Enable || cc.BindDevice != "" {
+				continue
+			}
+			if cc.AutoIPInterface != "" {
+				cc.BindDevice = cc.AutoIPInterface
+				continue
+			}
+			return fmt.Errorf("af %s has %d channels: channel %s requires bind_device (egress is destination-routed; a bind IP alone cannot pin the uplink)", af, enabled, ch)
+		}
+	}
+	return nil
 }
 
 // validateControllerUniqueness enforces: within an AF, bind_addr/autoip_interface

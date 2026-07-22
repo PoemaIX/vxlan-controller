@@ -142,6 +142,15 @@ peer, and each client channel is given every controller address in its AF
 (connections rotate to the next address on failure). Two nodes can therefore
 name their uplinks `seednet`/`homeplus` and `hinet` and still form a full mesh.
 
+**An AF with more than one channel requires `bind_device` on every channel**
+(autoip channels use their interface automatically). Egress is routed by
+destination — a bind IP alone cannot pin which uplink a packet leaves on, so
+without device binding the second uplink is never actually used and its source
+address gets uRPF-filtered upstream. Config load and autogen both enforce
+this. Each (af, channel) also gets a locally-unique `vxlan_dst_port` (the
+kernel refuses two vxlan devices sharing VNI+port); peers learn each channel's
+port from the endpoint advertisement.
+
 **Controller selection**: each `controllers:` entry is `<node>`,
 `<node>/<channel>`, or `<node>/<af>/<channel>`:
 

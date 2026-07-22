@@ -207,6 +207,9 @@ func LoadClientConfig(path string) (*ClientConfig, []DefaultApplied, error) {
 	if err := validateClientUniqueness(cfg.AFSettings); err != nil {
 		return nil, nil, err
 	}
+	if err := validateClientBindDevices(cfg.AFSettings); err != nil {
+		return nil, nil, err
+	}
 
 	// Channel additional cost overlay (peer × af × isp)
 	if n, ok := m["channel_additional_costs"]; ok && n.Kind == yaml.SequenceNode {
@@ -356,6 +359,37 @@ func overlayClientChannel(afName types.AFName, chName types.ChannelName, node *y
 	}
 
 	return base, nil
+}
+
+// validateClientBindDevices enforces device binding on multi-uplink AFs: an
+// AF with more than one enabled channel must pin every channel to a device.
+// Encap and control egress are routed by DESTINATION — a bare bind IP does
+// not choose which uplink a packet leaves on — so without bind_device the
+// second uplink is never actually used (and its source address gets uRPF
+// filtered upstream). Autoip channels default to their own interface.
+func validateClientBindDevices(afs map[types.AFName]map[types.ChannelName]*ClientChannelConfig) error {
+	for af, chans := range afs {
+		enabled := 0
+		for _, cc := range chans {
+			if cc.Enable {
+				enabled++
+			}
+		}
+		if enabled < 2 {
+			continue
+		}
+		for ch, cc := range chans {
+			if !cc.Enable || cc.BindDevice != "" {
+				continue
+			}
+			if cc.AutoIPInterface != "" {
+				cc.BindDevice = cc.AutoIPInterface
+				continue
+			}
+			return fmt.Errorf("af %s has %d channels: channel %s requires bind_device (egress is destination-routed; a bind IP alone cannot pin the uplink)", af, enabled, ch)
+		}
+	}
+	return nil
 }
 
 // validateClientUniqueness enforces:

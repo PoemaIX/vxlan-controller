@@ -23,16 +23,16 @@ probe_port: 5010
 nodes:
   siteA:
     v4:
-      ISP1: 10.1.1.1
-      ISP2: 10.2.1.1
+      ISP1: {bind: 10.1.1.1, bind_device: eth-isp1}
+      ISP2: {bind: 10.2.1.1, bind_device: eth-isp2}
   siteB:
     v4:
-      ISP1: 10.1.1.2
-      ISP2: 10.2.1.2
+      ISP1: {bind: 10.1.1.2, bind_device: eth-isp1}
+      ISP2: {bind: 10.2.1.2, bind_device: eth-isp2}
   hub:
     v4:
-      ISP1: 203.0.113.10
-      ISP2: 203.0.113.20
+      ISP1: {bind: 203.0.113.10, bind_device: eth-isp1}
+      ISP2: {bind: 203.0.113.20, bind_device: eth-isp2}
 
 controllers:
   - hub
@@ -113,8 +113,8 @@ nodes:
       ISP1: 10.1.1.1
   hub:
     v4:
-      wan1: 203.0.113.10
-      wan2: 203.0.113.20
+      wan1: {bind: 203.0.113.10, bind_device: eth-wan1}
+      wan2: {bind: 203.0.113.20, bind_device: eth-wan2}
     v6:
       # autoip without ddns: must be REJECTED as controller uplink, but is
       # fine when only hub/wan1 is selected.
@@ -156,6 +156,23 @@ if "$TMPDIR/vxlan-controller" --mode autogen --config "$TMPDIR/topology3.yaml" 2
     exit 1
 fi
 echo "  OK: bare-node spec still validates every channel"
+
+echo ""
+echo "=== Multi-channel AF without bind_device is rejected ==="
+cat > "$TMPDIR/topology4.yaml" << 'YAML'
+nodes:
+  dual:
+    v4:
+      wan1: 10.1.1.1
+      wan2: 10.2.1.1
+controllers: [dual]
+clients: [dual]
+YAML
+if "$TMPDIR/vxlan-controller" --mode autogen --config "$TMPDIR/topology4.yaml" 2>/dev/null; then
+    echo "  FAIL: multi-channel AF without bind_device should be rejected"
+    exit 1
+fi
+echo "  OK: multi-channel AF without bind_device rejected"
 
 echo ""
 echo "PASS: multi-channel autogen produces parseable per-channel configs"

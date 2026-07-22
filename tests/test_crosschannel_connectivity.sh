@@ -56,6 +56,7 @@ address_families:
     c1:
       enable: true
       bind_addr: "${ISP1_V4}.10"
+      bind_device: "ei1-v4"
       communication_port: ${COMM_PORT_V4}
       vxlan_vni: ${VNI}
       vxlan_dst_port: ${VXLAN_DSTPORT}
@@ -64,6 +65,7 @@ address_families:
     c2:
       enable: true
       bind_addr: "${ISP2_V4}.10"
+      bind_device: "ei2-v4"
       communication_port: ${COMM_PORT_V4_ISP2}
       vxlan_vni: ${VNI}
       vxlan_dst_port: ${VXLAN_DSTPORT}
@@ -80,13 +82,14 @@ YAML
     CTRL_10_CONF="$f"
 }
 
-# write_cc_channel CHNAME BIND_ADDR PROBE_PORT VXLAN_NAME VXLAN_PORT
+# write_cc_channel CHNAME BIND_ADDR PROBE_PORT VXLAN_NAME VXLAN_PORT [BIND_DEV]
 write_cc_channel() {
-    local chname=$1 bind_addr=$2 probe_port=$3 vxlan_name=$4 vxlan_port=$5
+    local chname=$1 bind_addr=$2 probe_port=$3 vxlan_name=$4 vxlan_port=$5 bind_dev=${6:-}
     cat << YAML
     ${chname}:
       enable: true
       bind_addr: "${bind_addr}"
+${bind_dev:+      bind_device: "${bind_dev}"}
       probe_port: ${probe_port}
       communication_port: 0
       vxlan_name: "${vxlan_name}"
@@ -124,12 +127,12 @@ address_families:
 YAML
     case "$node" in
         1)
-            write_cc_channel n1a "${ISP1_V4}.1" $PROBE_PORT_V4      vx-n1a 4789 >> "$f"
-            write_cc_channel n1b "${ISP2_V4}.1" $PROBE_PORT_V4_ISP2 vx-n1b 4790 >> "$f"
+            write_cc_channel n1a "${ISP1_V4}.1" $PROBE_PORT_V4      vx-n1a 4789 ei1-v4 >> "$f"
+            write_cc_channel n1b "${ISP2_V4}.1" $PROBE_PORT_V4_ISP2 vx-n1b 4790 ei2-v4 >> "$f"
             ;;
         2)
-            write_cc_channel n2a "${ISP1_V4}.2" $PROBE_PORT_V4      vx-n2a 4791 >> "$f"
-            write_cc_channel n2b "${ISP2_V4}.2" $PROBE_PORT_V4_ISP2 vx-n2b 4793 >> "$f"
+            write_cc_channel n2a "${ISP1_V4}.2" $PROBE_PORT_V4      vx-n2a 4791 ei1-v4 >> "$f"
+            write_cc_channel n2b "${ISP2_V4}.2" $PROBE_PORT_V4_ISP2 vx-n2b 4793 ei2-v4 >> "$f"
             ;;
         3)
             write_cc_channel n3b "${ISP2_V4}.3" $PROBE_PORT_V4_ISP2 vx-n3b 4792 >> "$f"

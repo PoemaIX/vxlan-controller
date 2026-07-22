@@ -12,6 +12,7 @@
 - `vxlan_name` 必須跨所有 (af, channel) 全域唯一（預設 `<prefix><af>-<channel>`，例如 `vxlan-v4-ISP1`）。
 - bind_addr / autoip_interface 必須在同一個 AF 內互異。
 - **Channel 名稱是各節點自己的 uplink 標籤，跨節點不需要一致**。同一個 AF 內，本地每個 channel 會對每個 peer 的每個 channel 做 probe（全交叉組合），路由以 `(local, peer)` channel pair 為粒度選最低延遲的鏈路。
+- **同 AF 多 channel 強制要求 `bind_device`**（autoip channel 自動用其介面）：egress 由目的位址查路由決定，光綁 bind IP 無法決定封包從哪條 uplink 出去。config 載入與 autogen 都會驗證。另外每個 (af, channel) 的 `vxlan_dst_port` 必須本地唯一（kernel 拒絕同 (VNI, port) 的兩個裝置；同一 (family, port) 的 vxlan 共用 wildcard socket、RX 只憑 VNI demux），autogen 會自動配 base+offset 並跳過 probe/comm port。
 - handshake 訊息帶 `channel_name`，Controller 只比對 AF；連線 slot 以 client 註冊的 channel 名稱為準（listener 的 channel 只代表 controller 自己的 uplink）。
 - 量測與路由的 key 是 `types.ChannelPair{Local, Peer}`：`AFProbeResult` 帶 `peer_channel_name`、`RouteMatrixCell` 帶 `channel_name`（本地端）+ `peer_channel_name`（下一跳端）。FDB 用本地 channel 選 vxlan device、用 peer channel 查下一跳 endpoint；當對端 channel 的 `vxlan_dst_port` 與本地 device 不同時，FDB entry 會帶 per-entry `port` override。
 - Client 的每個 channel 會拿到同 AF 內所有 controller 的所有位址，同一個 controller 只維持一條連線，失敗時輪替到下一個位址。

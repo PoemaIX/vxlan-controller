@@ -235,6 +235,7 @@ address_families:
     ISP1:
       enable: true
       bind_addr: "${ISP1_V4}.${node}"
+      bind_device: "ei1-v4"
       communication_port: ${COMM_PORT_V4}
       vxlan_vni: ${VNI}
       vxlan_dst_port: ${VXLAN_DSTPORT}
@@ -243,6 +244,7 @@ address_families:
     ISP2:
       enable: true
       bind_addr: "${ISP2_V4}.${node}"
+      bind_device: "ei2-v4"
       communication_port: ${COMM_PORT_V4_ISP2}
       vxlan_vni: ${VNI}
       vxlan_dst_port: $((VXLAN_DSTPORT + 1))
@@ -252,6 +254,7 @@ address_families:
     ISP1:
       enable: true
       bind_addr: "${ISP1_V6}${node}"
+      bind_device: "ei1-v6"
       communication_port: ${COMM_PORT_V6}
       vxlan_vni: ${VNI}
       vxlan_dst_port: $((VXLAN_DSTPORT + 2))
@@ -260,6 +263,7 @@ address_families:
     ISP2:
       enable: true
       bind_addr: "${ISP2_V6}${node}"
+      bind_device: "ei2-v6"
       communication_port: ${COMM_PORT_V6_ISP2}
       vxlan_vni: ${VNI}
       vxlan_dst_port: $((VXLAN_DSTPORT + 3))
@@ -301,10 +305,9 @@ YAML
 
     write_mc_client_channel() {
         local af=$1 isp=$2 bind_addr=$3 probe_port=$4 comm_port=$5 vxlan_name=$6 vxlan_dst_port=$7 ctrl_addr=$8
-        local dev_line=""
-        if [ "$method" = "device" ]; then
-            dev_line="      bind_device: \"ei${isp}-${af}\""
-        fi
+        # Multi-channel AFs require bind_device (egress is destination-routed;
+        # a bind IP alone cannot pin the uplink), so always emit it.
+        local dev_line="      bind_device: \"ei${isp}-${af}\""
         cat << YAML
     ISP${isp}:
       enable: true
