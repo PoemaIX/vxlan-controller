@@ -34,9 +34,23 @@ get_fdb_iface() {
         $1 == m && /self/ { print $3 }' | head -1
 }
 
-vxlan_for() {
-    local isp=$1 af=$2
-    echo "vxlan-${af}-ISP${isp}"
+# FDB dst address for a MAC. With channel-pair routing the local device is an
+# arbitrary tie-break (no bind_device -> kernel routes by dst); the dst
+# address is what actually selects the underlay path, so assert on that.
+get_fdb_dst() {
+    local node=$1 mac=$2
+    ip netns exec "node-$node" bridge fdb show | awk -v m="$mac" '
+        $1 == m && /self/ { for (i=1;i<NF;i++) if ($i=="dst") print $(i+1) }' | head -1
+}
+
+# Peer node-N's address on a given (isp, af) LAN.
+peer_addr_for() {
+    local isp=$1 af=$2 peer=$3
+    if [ "$af" = "v4" ]; then
+        if [ "$isp" = "1" ]; then echo "${ISP1_V4}.${peer}"; else echo "${ISP2_V4}.${peer}"; fi
+    else
+        if [ "$isp" = "1" ]; then echo "${ISP1_V6}${peer}"; else echo "${ISP2_V6}${peer}"; fi
+    fi
 }
 
 restore_node1_all_channels() {
@@ -79,6 +93,40 @@ wait_fdb_iface() {
     test_total=$((test_total + 1))
     while [ "$SECONDS" -lt "$deadline" ]; do
         got=$(get_fdb_iface "$node" "$mac")
+        if [ "$got" = "$want" ]; then
+            echo "  TEST: $name ... PASS"
+            test_pass=$((test_pass + 1))
+            return
+        fi
+        sleep 2
+    done
+
+    echo "  TEST: $name ... FAIL (got ${got:-none}, want $want)"
+    test_fail=$((test_fail + 1))
+}
+
+assert_fdb_dst() {
+    local name=$1 node=$2 mac=$3 want=$4
+    local got
+    got=$(get_fdb_dst "$node" "$mac")
+    test_total=$((test_total + 1))
+    if [ "$got" = "$want" ]; then
+        echo "  TEST: $name ... PASS"
+        test_pass=$((test_pass + 1))
+    else
+        echo "  TEST: $name ... FAIL (got ${got:-none}, want $want)"
+        test_fail=$((test_fail + 1))
+    fi
+}
+
+wait_fdb_dst() {
+    local name=$1 node=$2 mac=$3 want=$4 timeout=${5:-70}
+    local deadline=$((SECONDS + timeout))
+    local got=""
+
+    test_total=$((test_total + 1))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        got=$(get_fdb_dst "$node" "$mac")
         if [ "$got" = "$want" ]; then
             echo "  TEST: $name ... PASS"
             test_pass=$((test_pass + 1))
@@ -173,8 +221,8 @@ mc_run_test "per-peer fastest ping leaf-1 -> leaf-2" \
     ip netns exec leaf-1 ping -c 3 -W 5 "${LEAF_V4}.2"
 mc_run_test "per-peer fastest ping leaf-1 -> leaf-3" \
     ip netns exec leaf-1 ping -c 3 -W 5 "${LEAF_V4}.3"
-assert_fdb_iface "node-1 -> leaf-2 uses v4/ISP1" 1 "$LEAF2_MAC" "vxlan-v4-ISP1"
-assert_fdb_iface "node-1 -> leaf-3 uses v4/ISP2" 1 "$LEAF3_MAC" "vxlan-v4-ISP2"
+assert_fdb_dst "node-1 -> leaf-2 uses node-2's ISP1 addr" 1 "$LEAF2_MAC" "${ISP1_V4}.2"
+assert_fdb_dst "node-1 -> leaf-3 uses node-3's ISP2 addr" 1 "$LEAF3_MAC" "${ISP2_V4}.3"
 
 restore_node1_all_channels
 sleep 18
@@ -184,7 +232,7 @@ echo "=== Scenario 2: recovery after all node-1 channels are down ==="
 for spec in "2 v6" "1 v4" "2 v4" "1 v6"; do
     isp=${spec%% *}
     af=${spec##* }
-    want_iface=$(vxlan_for "$isp" "$af")
+    want_dst=$(peer_addr_for "$isp" "$af" 2)
 
     echo ""
     echo "--- Restoring only ${af}/ISP${isp} ---"
@@ -195,8 +243,8 @@ for spec in "2 v6" "1 v4" "2 v4" "1 v6"; do
         ip netns exec leaf-1 ping -c 2 -W 3 "${LEAF_V4}.2"
 
     restore_link 1 "$isp" "$af"
-    wait_fdb_iface "node-1 -> leaf-2 converges to only restored ${af}/ISP${isp}" \
-        1 "$LEAF2_MAC" "$want_iface" 150
+    wait_fdb_dst "node-1 -> leaf-2 converges to only restored ${af}/ISP${isp}" \
+        1 "$LEAF2_MAC" "$want_dst" 150
 
     wait_ping_succeeds "leaf-1 -> leaf-2 with only ${af}/ISP${isp} restored" 80 \
         ip netns exec leaf-1 ping -c 3 -W 5 "${LEAF_V4}.2"
