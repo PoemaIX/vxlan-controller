@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -299,10 +300,11 @@ func (c *Client) createTapInject() error {
 	// the bridge only forwards group traffic to ports that joined — the tap
 	// never joins anything, so ND solicitations would stop reaching the
 	// relay. Mark the tap as a multicast router port (2 = permanent) so it
-	// always receives all multicast regardless of snooping state.
-	cmd = exec.Command("bridge", "link", "set", "dev", tapDeviceName, "mcast_router", "2")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		vlog.Warnf("[Client] set tap mcast_router: %v: %s", err, out)
+	// always receives all multicast regardless of snooping state. Written
+	// via sysfs: older iproute2 `bridge link set` has no mcast_router.
+	mrPath := fmt.Sprintf("/sys/class/net/%s/brif/%s/multicast_router", c.Config.BridgeName, tapDeviceName)
+	if err := os.WriteFile(mrPath, []byte("2"), 0644); err != nil {
+		vlog.Warnf("[Client] set tap mcast_router: %v", err)
 	}
 
 	if err := netlink.LinkSetUp(link); err != nil {
