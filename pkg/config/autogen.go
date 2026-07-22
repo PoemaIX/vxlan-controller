@@ -30,6 +30,11 @@ type AutogenConfig struct {
 	Priority          int     `yaml:"priority"`
 	ForwardCost       float64 `yaml:"forward_cost"`
 
+	// NTPServers overrides the generated clients' ntp_servers list. nil (key
+	// absent) keeps the built-in default pool; an explicit empty list ([])
+	// disables NTP so clients run on system time only.
+	NTPServers *[]string `yaml:"ntp_servers"`
+
 	// Nodes[nodeName][afName][channelName] = endpoint config.
 	// YAML shorthand: a scalar or a map with "bind" key is treated as a single
 	// channel named types.DefaultChannelName.
@@ -425,6 +430,12 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 	}
 	if ag.VxlanFirewall != nil {
 		cfg.VxlanFirewall = *ag.VxlanFirewall
+	}
+
+	if ag.NTPServers != nil {
+		// Copy so every generated config owns its slice; an empty list means
+		// "no NTP, system time only" and must survive as [] in the yaml.
+		cfg.NTPServers = append([]string{}, (*ag.NTPServers)...)
 	}
 
 	// Precompute deterministic vxlan_name per (af, channel) for this node.

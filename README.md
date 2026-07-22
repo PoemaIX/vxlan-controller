@@ -151,6 +151,11 @@ this. Each (af, channel) also gets a locally-unique `vxlan_dst_port` (the
 kernel refuses two vxlan devices sharing VNI+port); peers learn each channel's
 port from the endpoint advertisement.
 
+**NTP**: a top-level `ntp_servers:` list overrides the generated clients'
+NTP pool. Omit it to keep the built-in defaults; set `ntp_servers: []` to
+disable NTP entirely (clients use system time — fine when every node already
+runs chrony/timesyncd, since probe latency is measured one-way across nodes).
+
 **Controller selection**: each `controllers:` entry is `<node>`,
 `<node>/<channel>`, or `<node>/<af>/<channel>`:
 

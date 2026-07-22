@@ -158,6 +158,26 @@ fi
 echo "  OK: bare-node spec still validates every channel"
 
 echo ""
+echo "=== ntp_servers passthrough ==="
+# Absent key -> default pool; explicit [] -> disabled (system time only).
+if ! grep -q "time.cloudflare.com" "$TMPDIR/siteA.client.yaml"; then
+    echo "  FAIL: default ntp pool missing when topo omits ntp_servers"
+    exit 1
+fi
+echo "  OK: default ntp pool kept when ntp_servers omitted"
+sed '1i ntp_servers: []' "$TMPDIR/topology.yaml" > "$TMPDIR/topology_ntp.yaml"
+"$TMPDIR/vxlan-controller" --mode autogen --config "$TMPDIR/topology_ntp.yaml" > /dev/null
+if grep -q "time.cloudflare.com" "$TMPDIR/siteA.client.yaml"; then
+    echo "  FAIL: ntp_servers: [] should disable the default pool"
+    exit 1
+fi
+grep -q "ntp_servers: \[\]" "$TMPDIR/siteA.client.yaml" || {
+    echo "  FAIL: generated config missing explicit empty ntp_servers"
+    exit 1
+}
+echo "  OK: ntp_servers: [] propagates as an explicit empty list"
+
+echo ""
 echo "=== Multi-channel AF without bind_device is rejected ==="
 cat > "$TMPDIR/topology4.yaml" << 'YAML'
 nodes:
