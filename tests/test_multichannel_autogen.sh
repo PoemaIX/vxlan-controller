@@ -149,6 +149,17 @@ fi
 echo "  OK: hub controller config listens only on wan1"
 
 echo ""
+echo "=== verify vxlan ports restart per family (v4/v6 sockets are separate) ==="
+# hub has v4 wan1/wan2 (4789, 4790) and v6 wan6: v6 must reuse the base
+# 4789, not continue counting after the v4 channels.
+v6port=$(sed -n '/^    v6:/,$p' "$TMPDIR/hub.client.yaml" | grep "vxlan_dst_port:" | head -1 | awk '{print $2}')
+if [ "$v6port" != "4789" ]; then
+    echo "  FAIL: hub v6 channel should reuse base port 4789, got ${v6port:-none}"
+    exit 1
+fi
+echo "  OK: hub v6 wan6 reuses base port 4789"
+
+echo ""
 echo "=== Bare-node controller with unreachable autoip channel is rejected ==="
 sed 's|^  - hub/wan1|  - hub|' "$TMPDIR/topology2.yaml" > "$TMPDIR/topology3.yaml"
 if "$TMPDIR/vxlan-controller" --mode autogen --config "$TMPDIR/topology3.yaml" 2>/dev/null; then

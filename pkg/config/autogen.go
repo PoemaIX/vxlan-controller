@@ -549,11 +549,15 @@ func formatAddrPort(host string, port uint16) string {
 // MaxIfnameLen is the Linux IFNAMSIZ-1 (15 char limit for interface names).
 const MaxIfnameLen = 15
 
-// buildVxlanPorts assigns each (af, channel) of one node a deterministic,
-// locally-unique vxlan dst_port: base, base+1, ... over the sorted af then
-// channel order, skipping reserved ports (probe/communication) — the kernel
-// binds vxlan sockets on the wildcard address, so a vxlan port equal to the
-// probe port would steal the probe listener's bind.
+// buildVxlanPorts assigns each (af, channel) of one node a deterministic
+// vxlan dst_port. The kernel's uniqueness domain is (address family, port):
+// vxlan devices of the same family share one wildcard socket and RX-demux
+// only by VNI, so ports must be unique WITHIN a family but v4 and v6 can
+// reuse the same port. Allocation restarts at base per family (sorted af,
+// then sorted channel order), skipping reserved ports (probe/communication —
+// the wildcard vxlan socket would steal those listeners' binds). A node with
+// one channel per family therefore keeps the base port everywhere; only
+// additional same-family channels move up.
 func buildVxlanPorts(afs map[string]AutogenAFChannels, base uint16, reserved ...uint16) map[types.AFName]map[types.ChannelName]uint16 {
 	isReserved := func(p uint16) bool {
 		for _, r := range reserved {
@@ -571,16 +575,16 @@ func buildVxlanPorts(afs map[string]AutogenAFChannels, base uint16, reserved ...
 	sort.Strings(afNames)
 
 	result := make(map[types.AFName]map[types.ChannelName]uint16, len(afs))
-	port := base
-	next := func() uint16 {
-		for isReserved(port) {
-			port++
-		}
-		p := port
-		port++
-		return p
-	}
 	for _, afName := range afNames {
+		port := base
+		next := func() uint16 {
+			for isReserved(port) {
+				port++
+			}
+			p := port
+			port++
+			return p
+		}
 		chans := afs[afName]
 		chNames := make([]types.ChannelName, 0, len(chans))
 		for ch := range chans {

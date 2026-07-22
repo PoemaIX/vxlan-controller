@@ -200,9 +200,17 @@ func (c *Client) createVxlanDevice(vd *VxlanDev, cc *config.ClientChannelConfig)
 		args = append(args, "dev", cc.BindDevice)
 	}
 	if cc.VxlanSrcPortStart > 0 && cc.VxlanSrcPortEnd > 0 {
+		start, end := cc.VxlanSrcPortStart, cc.VxlanSrcPortEnd
+		// The kernel's udp_flow_src_port() treats min >= max as "no range"
+		// and silently uses ephemeral source ports. A start==end config can
+		// only mean "pin to this port" — widen to the half-open
+		// [start, start+1) the kernel actually honours.
+		if end <= start && start < 65535 {
+			end = start + 1
+		}
 		args = append(args, "srcport",
-			fmt.Sprintf("%d", cc.VxlanSrcPortStart),
-			fmt.Sprintf("%d", cc.VxlanSrcPortEnd))
+			fmt.Sprintf("%d", start),
+			fmt.Sprintf("%d", end))
 	}
 
 	cmd := exec.Command("ip", args...)
