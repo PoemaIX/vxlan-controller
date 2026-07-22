@@ -76,9 +76,13 @@ func (c *Client) authoritySelectLoop() {
 	}
 	c.mu.Unlock()
 
-	// Notify FDB reconciler and firewall
+	// Notify FDB reconciler, firewall and rate limiter. The rate limiter in
+	// particular may have last been notified before an authority existed (all
+	// peer state can arrive before init_timeout) — without a kick here it
+	// would never compute caps.
 	c.notifyFDB()
 	c.notifyFirewall()
+	c.notifyRateLimit()
 
 	// Run initial probe now that authority is selected.
 	// The controller's sync_new_client_debounce probe fires before init_timeout,
@@ -113,6 +117,7 @@ func (c *Client) authoritySelectLoop() {
 			if changed {
 				c.notifyFDB()
 				c.notifyFirewall()
+				c.notifyRateLimit()
 			}
 		case <-c.ctx.Done():
 			return
