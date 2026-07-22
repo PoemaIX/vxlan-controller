@@ -88,4 +88,62 @@ if grep -c "vxlan-v4-ISP2" "$TMPDIR/siteA.client.yaml" | grep -q "^[1-9]"; then
 fi
 
 echo ""
+echo "=== Per-channel controller spec (node/channel) ==="
+cat > "$TMPDIR/topology2.yaml" << 'YAML'
+vxlan_dst_port: 4789
+communication_port: 5000
+vxlan_vni: 100
+probe_port: 5010
+
+nodes:
+  siteA:
+    v4:
+      ISP1: 10.1.1.1
+  hub:
+    v4:
+      wan1: 203.0.113.10
+      wan2: 203.0.113.20
+    v6:
+      # autoip without ddns: must be REJECTED as controller uplink, but is
+      # fine when only hub/wan1 is selected.
+      wan6: eth9
+
+controllers:
+  - hub/wan1
+clients:
+  - siteA
+  - hub
+YAML
+
+"$TMPDIR/vxlan-controller" --mode autogen --config "$TMPDIR/topology2.yaml"
+
+f="$TMPDIR/siteA.client.yaml"
+if ! grep -q "203.0.113.10:5000" "$f"; then
+    echo "  FAIL: siteA missing selected controller endpoint 203.0.113.10"
+    exit 1
+fi
+echo "  OK: siteA references selected endpoint 203.0.113.10"
+if grep -q "203.0.113.20:5000" "$f"; then
+    echo "  FAIL: siteA references UNselected controller channel wan2"
+    exit 1
+fi
+echo "  OK: unselected channel wan2 not exposed as controller endpoint"
+
+f="$TMPDIR/hub.controller.yaml"
+if ! grep -q "wan1" "$f" || grep -q "wan2\|wan6" "$f"; then
+    echo "  FAIL: hub controller config should only listen on wan1"
+    exit 1
+fi
+echo "  OK: hub controller config listens only on wan1"
+
+echo ""
+echo "=== Bare-node controller with unreachable autoip channel is rejected ==="
+sed 's|^  - hub/wan1|  - hub|' "$TMPDIR/topology2.yaml" > "$TMPDIR/topology3.yaml"
+if "$TMPDIR/vxlan-controller" --mode autogen --config "$TMPDIR/topology3.yaml" 2>/dev/null; then
+    echo "  FAIL: bare 'hub' with ddns-less autoip v6 channel should fail validation"
+    exit 1
+fi
+echo "  OK: bare-node spec still validates every channel"
+
+echo ""
 echo "PASS: multi-channel autogen produces parseable per-channel configs"

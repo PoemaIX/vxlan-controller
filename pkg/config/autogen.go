@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"vxlan-controller/pkg/crypto"
 	"vxlan-controller/pkg/types"
@@ -137,6 +138,50 @@ type autogenNodeKeys struct {
 	Pub  [32]byte
 }
 
+// controllerSpec is one parsed `controllers:` entry. Selection granularity:
+//   "node"             → every (af, channel) of the node
+//   "node/channel"     → that channel in every AF that has it
+//   "node/af/channel"  → exactly that (af, channel)
+// Only the selected channels become controller listeners / client-visible
+// endpoints; the node's other channels stay client-only.
+type controllerSpec struct {
+	Name    string
+	AF      types.AFName      // "" = any AF
+	Channel types.ChannelName // "" = all channels
+}
+
+func parseControllerSpec(s string) (controllerSpec, error) {
+	parts := strings.Split(s, "/")
+	for _, p := range parts {
+		if p == "" {
+			return controllerSpec{}, fmt.Errorf("invalid controller %q (want node, node/channel, or node/af/channel)", s)
+		}
+	}
+	switch len(parts) {
+	case 1:
+		return controllerSpec{Name: parts[0]}, nil
+	case 2:
+		return controllerSpec{Name: parts[0], Channel: types.ChannelName(parts[1])}, nil
+	case 3:
+		return controllerSpec{Name: parts[0], AF: types.AFName(parts[1]), Channel: types.ChannelName(parts[2])}, nil
+	}
+	return controllerSpec{}, fmt.Errorf("invalid controller %q (want node, node/channel, or node/af/channel)", s)
+}
+
+func (sp controllerSpec) matches(af types.AFName, ch types.ChannelName) bool {
+	return (sp.AF == "" || sp.AF == af) && (sp.Channel == "" || sp.Channel == ch)
+}
+
+// controllerSelected reports whether (name, af, ch) is selected by any spec.
+func controllerSelected(specs []controllerSpec, name string, af types.AFName, ch types.ChannelName) bool {
+	for _, sp := range specs {
+		if sp.Name == name && sp.matches(af, ch) {
+			return true
+		}
+	}
+	return false
+}
+
 var DefaultAutogenConfig = AutogenConfig{
 	BridgeName:        "br-vxlan",
 	VxlanNamePrefix:   "vxlan-",
@@ -164,13 +209,35 @@ func Autogen(path string) error {
 		return fmt.Errorf("parse topology: %w", err)
 	}
 
-	// Validate node references
+	// Parse and validate controller specs
 	allRoles := map[string]bool{}
-	for _, name := range ag.Controllers {
-		if _, ok := ag.Nodes[name]; !ok {
-			return fmt.Errorf("controller %q not found in nodes", name)
+	specs := make([]controllerSpec, 0, len(ag.Controllers))
+	var ctrlNames []string // unique node names, first-appearance order
+	for _, s := range ag.Controllers {
+		sp, err := parseControllerSpec(s)
+		if err != nil {
+			return err
 		}
-		allRoles[name] = true
+		if _, ok := ag.Nodes[sp.Name]; !ok {
+			return fmt.Errorf("controller %q not found in nodes", sp.Name)
+		}
+		// The spec must select at least one existing (af, channel).
+		found := false
+		for afName, chans := range ag.Nodes[sp.Name] {
+			for chName := range chans {
+				if sp.matches(types.AFName(afName), chName) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			return fmt.Errorf("controller %q selects no (af, channel) on node %q", s, sp.Name)
+		}
+		if !allRoles[sp.Name] {
+			ctrlNames = append(ctrlNames, sp.Name)
+		}
+		allRoles[sp.Name] = true
+		specs = append(specs, sp)
 	}
 	for _, name := range ag.Clients {
 		if _, ok := ag.Nodes[name]; !ok {
@@ -186,10 +253,15 @@ func Autogen(path string) error {
 		keys[name] = &autogenNodeKeys{Priv: priv, Pub: pub}
 	}
 
-	// Validate controller (af, channel) have reachable endpoints
-	for _, name := range ag.Controllers {
+	// Validate that selected controller (af, channel) have reachable
+	// endpoints. Unselected channels of a controller node stay client-only
+	// and need no public endpoint.
+	for _, name := range ctrlNames {
 		for afName, chans := range ag.Nodes[name] {
 			for chName, af := range chans {
+				if !controllerSelected(specs, name, types.AFName(afName), chName) {
+					continue
+				}
 				if _, err := af.Endpoint(); err != nil {
 					return fmt.Errorf("controller %q AF %s channel %s: %w", name, afName, chName, err)
 				}
@@ -200,8 +272,8 @@ func Autogen(path string) error {
 	outDir := filepath.Dir(path)
 
 	// Generate controller configs
-	for _, name := range ag.Controllers {
-		cfg := ag.buildControllerConfig(name, keys)
+	for _, name := range ctrlNames {
+		cfg := ag.buildControllerConfig(name, keys, specs)
 		data, err := MarshalControllerConfig(cfg)
 		if err != nil {
 			return fmt.Errorf("marshal controller config for %s: %w", name, err)
@@ -214,7 +286,7 @@ func Autogen(path string) error {
 
 	// Generate client configs
 	for _, name := range ag.Clients {
-		cfg := ag.buildClientConfig(name, keys)
+		cfg := ag.buildClientConfig(name, keys, specs)
 		data, err := MarshalClientConfig(cfg)
 		if err != nil {
 			return fmt.Errorf("marshal client config for %s: %w", name, err)
@@ -228,17 +300,21 @@ func Autogen(path string) error {
 	return nil
 }
 
-func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*autogenNodeKeys) *ControllerConfig {
+func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*autogenNodeKeys, specs []controllerSpec) *ControllerConfig {
 	k := keys[name]
 	cfg := cloneControllerConfig(&DefaultControllerConfig)
 
 	cfg.PrivateKey = k.Priv
 
-	// AF settings from this node's (af, channel) pairs
+	// AF settings: only the (af, channel) pairs selected as controller
+	// listeners; the node's other channels stay client-only.
 	cfg.AFSettings = make(map[types.AFName]map[types.ChannelName]*ControllerChannelConfig)
 	for afName, chans := range ag.Nodes[name] {
 		inner := make(map[types.ChannelName]*ControllerChannelConfig, len(chans))
 		for chName, af := range chans {
+			if !controllerSelected(specs, name, types.AFName(afName), chName) {
+				continue
+			}
 			cc := &ControllerChannelConfig{
 				AF:                types.AFName(afName),
 				Channel:           chName,
@@ -257,7 +333,9 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 			cc.BindDevice = af.BindDevice
 			inner[chName] = cc
 		}
-		cfg.AFSettings[types.AFName(afName)] = inner
+		if len(inner) > 0 {
+			cfg.AFSettings[types.AFName(afName)] = inner
+		}
 	}
 
 	// WebUI config
@@ -317,7 +395,7 @@ func (ag *AutogenConfig) buildControllerConfig(name string, keys map[string]*aut
 	return cfg
 }
 
-func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogenNodeKeys) *ClientConfig {
+func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogenNodeKeys, specs []controllerSpec) *ClientConfig {
 	k := keys[name]
 	cfg := cloneClientConfig(&DefaultClientConfig)
 
@@ -359,28 +437,46 @@ func (ag *AutogenConfig) buildClientConfig(name string, keys map[string]*autogen
 			}
 			cc.BindDevice = af.BindDevice
 
-			// Add controllers that have this (af, channel)
-			for _, ctrlName := range ag.Controllers {
-				ctrlChans, ok := ag.Nodes[ctrlName][afName]
+			// Add controller endpoints selected for this AF. Channel names
+			// are per-node uplink labels, so a client channel can reach a
+			// controller on any of its selected uplinks in the same AF —
+			// list every address; the client keeps one connection per
+			// controller and rotates through its addresses on failure.
+			// Specs are walked in `controllers:` order, so the listed order
+			// doubles as the preference order for rotation.
+			seenCtrlEP := make(map[string]bool)
+			for _, sp := range specs {
+				ctrlChans, ok := ag.Nodes[sp.Name][afName]
 				if !ok {
 					continue
 				}
-				ctrlAF, ok := ctrlChans[chName]
-				if !ok {
-					continue
+				ck := keys[sp.Name]
+				ctrlChNames := make([]types.ChannelName, 0, len(ctrlChans))
+				for ctrlCh := range ctrlChans {
+					if sp.matches(types.AFName(afName), ctrlCh) {
+						ctrlChNames = append(ctrlChNames, ctrlCh)
+					}
 				}
-				var addr string
-				if ctrlName == name {
-					addr = ctrlAF.Bind
-				} else {
-					addr, _ = ctrlAF.Endpoint() // already validated
+				sort.Slice(ctrlChNames, func(i, j int) bool { return ctrlChNames[i] < ctrlChNames[j] })
+				for _, ctrlCh := range ctrlChNames {
+					epKey := sp.Name + "/" + string(ctrlCh)
+					if seenCtrlEP[epKey] {
+						continue
+					}
+					seenCtrlEP[epKey] = true
+					ctrlAF := ctrlChans[ctrlCh]
+					var addr string
+					if sp.Name == name && !ctrlAF.IsAutoIP() {
+						addr = ctrlAF.Bind
+					} else {
+						addr, _ = ctrlAF.Endpoint() // already validated
+					}
+					ap, _ := netip.ParseAddrPort(formatAddrPort(addr, ag.CommunicationPort))
+					cc.Controllers = append(cc.Controllers, ControllerEndpoint{
+						PubKey: ck.Pub,
+						Addr:   ap,
+					})
 				}
-				ck := keys[ctrlName]
-				ap, _ := netip.ParseAddrPort(formatAddrPort(addr, ag.CommunicationPort))
-				cc.Controllers = append(cc.Controllers, ControllerEndpoint{
-					PubKey: ck.Pub,
-					Addr:   ap,
-				})
 			}
 
 			inner[chName] = cc
