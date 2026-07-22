@@ -349,12 +349,20 @@ func (c *Controller) handleTCPConn(af types.AFName, ch types.ChannelName, conn n
 		return
 	}
 
-	// Verify the client's claimed (af, channel) matches this listener.
-	if types.AFName(reg.AfName) != af || types.ChannelName(reg.ChannelName) != ch {
-		vlog.Warnf("[Controller] client %s ClientRegister (af=%s channel=%s) mismatches listener (af=%s channel=%s)",
-			clientID.Hex()[:8], reg.AfName, reg.ChannelName, af, ch)
+	// The AF must match the listener (it names the transport family), but the
+	// channel is the CLIENT's own uplink label — channel names are per-node,
+	// so a client may reach any controller uplink from any of its channels.
+	// Slot the connection under the client's channel, not the listener's.
+	if types.AFName(reg.AfName) != af {
+		vlog.Warnf("[Controller] client %s ClientRegister af=%s mismatches listener af=%s",
+			clientID.Hex()[:8], reg.AfName, af)
 		return
 	}
+	if reg.ChannelName == "" {
+		vlog.Warnf("[Controller] client %s ClientRegister has empty channel", clientID.Hex()[:8])
+		return
+	}
+	ch = types.ChannelName(reg.ChannelName)
 
 	// Step 3: Update state
 	c.mu.Lock()
@@ -720,16 +728,16 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		}
 
 		li := &types.LatencyInfo{
-			AFs:    make(map[types.AFName]map[types.ChannelName]*types.AFLatency),
-			RawAFs: make(map[types.AFName]map[types.ChannelName]*types.AFLatency),
+			AFs:    make(map[types.AFName]map[types.ChannelPair]*types.AFLatency),
+			RawAFs: make(map[types.AFName]map[types.ChannelPair]*types.AFLatency),
 		}
 
 		// Raw (latest) results
 		for _, afResult := range entry.AfResults {
 			af := types.AFName(afResult.AfName)
-			ch := types.ChannelName(afResult.ChannelName)
+			ch := probeResultPair(afResult)
 			if _, ok := li.RawAFs[af]; !ok {
-				li.RawAFs[af] = make(map[types.ChannelName]*types.AFLatency)
+				li.RawAFs[af] = make(map[types.ChannelPair]*types.AFLatency)
 			}
 			li.RawAFs[af][ch] = &types.AFLatency{
 				Mean:        afResult.LatencyMean,
@@ -751,9 +759,9 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 		}
 		for _, afResult := range debouncedSource {
 			af := types.AFName(afResult.AfName)
-			ch := types.ChannelName(afResult.ChannelName)
+			ch := probeResultPair(afResult)
 			if _, ok := li.AFs[af]; !ok {
-				li.AFs[af] = make(map[types.ChannelName]*types.AFLatency)
+				li.AFs[af] = make(map[types.ChannelPair]*types.AFLatency)
 			}
 			li.AFs[af][ch] = &types.AFLatency{
 				Mean:        afResult.LatencyMean,
@@ -781,6 +789,20 @@ func (c *Controller) handleProbeResults(cc *ClientConn, payload []byte) {
 	c.resetTopoDebounce()
 
 	c.mu.Unlock()
+}
+
+// probeResultPair extracts the (local, peer) channel pair from an AFProbeResult.
+// Pre-pairing clients don't send peer_channel_name — fall back to the local
+// channel name (the old same-name assumption).
+func probeResultPair(r *pb.AFProbeResult) types.ChannelPair {
+	pair := types.ChannelPair{
+		Local: types.ChannelName(r.ChannelName),
+		Peer:  types.ChannelName(r.PeerChannelName),
+	}
+	if pair.Peer == "" {
+		pair.Peer = pair.Local
+	}
+	return pair
 }
 
 func (c *Controller) resetNewClientDebounce() {
@@ -883,14 +905,14 @@ func (c *Controller) triggerTopologyUpdate() {
 	// Log best paths and RouteMatrix for debugging
 	for src, dsts := range c.State.BestPaths {
 		for dst, bp := range dsts {
-			vlog.Verbosef("[Controller] BestPath: %s -> %s: cost=%.2f af=%s channel=%s",
-				src.Hex()[:8], dst.Hex()[:8], bp.Cost, bp.AF, bp.Channel)
+			vlog.Verbosef("[Controller] BestPath: %s -> %s: cost=%.2f af=%s channel=%s>%s",
+				src.Hex()[:8], dst.Hex()[:8], bp.Cost, bp.AF, bp.Channel, bp.PeerChannel)
 		}
 	}
 	for src, dsts := range newRM {
 		for dst, re := range dsts {
-			vlog.Verbosef("[Controller] RouteMatrix: %s -> %s: nextHop=%s af=%s channel=%s",
-				src.Hex()[:8], dst.Hex()[:8], re.NextHop.Hex()[:8], re.AF, re.Channel)
+			vlog.Verbosef("[Controller] RouteMatrix: %s -> %s: nextHop=%s af=%s channel=%s>%s",
+				src.Hex()[:8], dst.Hex()[:8], re.NextHop.Hex()[:8], re.AF, re.Channel, re.PeerChannel)
 		}
 	}
 

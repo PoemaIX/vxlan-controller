@@ -28,12 +28,14 @@ func computeRouteMatrix(
 	next := make([][]int, n)
 	afMatrix := make([][]types.AFName, n)
 	chMatrix := make([][]types.ChannelName, n)
+	peerChMatrix := make([][]types.ChannelName, n)
 
 	for i := 0; i < n; i++ {
 		cost[i] = make([]float64, n)
 		next[i] = make([]int, n)
 		afMatrix[i] = make([]types.AFName, n)
 		chMatrix[i] = make([]types.ChannelName, n)
+		peerChMatrix[i] = make([]types.ChannelName, n)
 		for j := 0; j < n; j++ {
 			if i == j {
 				cost[i][j] = 0
@@ -64,6 +66,7 @@ func computeRouteMatrix(
 				next[srcI][dstI] = dstI
 				afMatrix[srcI][dstI] = bp.AF
 				chMatrix[srcI][dstI] = bp.Channel
+				peerChMatrix[srcI][dstI] = bp.PeerChannel
 			}
 		}
 	}
@@ -105,10 +108,12 @@ func computeRouteMatrix(
 			nextHop := nodes[nextHopIdx]
 			af := afMatrix[i][nextHopIdx]
 			ch := chMatrix[i][nextHopIdx]
+			peerCh := peerChMatrix[i][nextHopIdx]
 			result[src][dst] = &types.RouteEntry{
-				NextHop: nextHop,
-				AF:      af,
-				Channel: ch,
+				NextHop:     nextHop,
+				AF:          af,
+				Channel:     ch,
+				PeerChannel: peerCh,
 			}
 		}
 	}

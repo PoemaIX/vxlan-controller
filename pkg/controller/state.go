@@ -212,10 +212,11 @@ func routeMatrixToProto(rm map[types.ClientID]map[types.ClientID]*types.RouteEnt
 		row := &pb.RouteMatrixRow{SrcClientId: src[:]}
 		for dst, entry := range dsts {
 			cell := &pb.RouteMatrixCell{
-				DstClientId: dst[:],
-				NexthopId:   entry.NextHop[:],
-				AfName:      string(entry.AF),
-				ChannelName: string(entry.Channel),
+				DstClientId:     dst[:],
+				NexthopId:       entry.NextHop[:],
+				AfName:          string(entry.AF),
+				ChannelName:     string(entry.Channel),
+				PeerChannelName: string(entry.PeerChannel),
 			}
 			row.Cells = append(row.Cells, cell)
 		}
@@ -299,10 +300,15 @@ func ProtoToRouteMatrix(p *pb.RouteMatrixProto) map[types.ClientID]map[types.Cli
 			var dst, nexthop types.ClientID
 			copy(dst[:], cell.DstClientId)
 			copy(nexthop[:], cell.NexthopId)
+			peerCh := types.ChannelName(cell.PeerChannelName)
+			if peerCh == "" {
+				peerCh = types.ChannelName(cell.ChannelName)
+			}
 			rm[src][dst] = &types.RouteEntry{
-				NextHop: nexthop,
-				AF:      types.AFName(cell.AfName),
-				Channel: types.ChannelName(cell.ChannelName),
+				NextHop:     nexthop,
+				AF:          types.AFName(cell.AfName),
+				Channel:     types.ChannelName(cell.ChannelName),
+				PeerChannel: peerCh,
 			}
 		}
 	}

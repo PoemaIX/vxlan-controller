@@ -183,9 +183,11 @@ func (c *Client) handleProbeRequest(af types.AFName, ch types.ChannelName, conn 
 	}
 
 	resp := &pb.ProbeResponse{
-		ProbeId:      req.ProbeId,
-		DstTimestamp: c.ntp.Now().UnixNano(),
-		SrcTimestamp: req.SrcTimestamp,
+		ProbeId:        req.ProbeId,
+		DstTimestamp:   c.ntp.Now().UnixNano(),
+		SrcTimestamp:   req.SrcTimestamp,
+		SrcChannelName: req.SrcChannelName,
+		DstChannelName: req.DstChannelName,
 	}
 	respData, err := proto.Marshal(resp)
 	if err != nil {
@@ -207,11 +209,23 @@ func (c *Client) handleProbeResponse(af types.AFName, ch types.ChannelName, peer
 		return
 	}
 
+	// The response echoes the channel pair the request was sent for. A peer
+	// running an older build echoes nothing — fall back to the receiving
+	// socket's channel on both sides (the old same-name assumption).
+	local := types.ChannelName(resp.SrcChannelName)
+	peer := types.ChannelName(resp.DstChannelName)
+	if local == "" {
+		local = ch
+	}
+	if peer == "" {
+		peer = ch
+	}
+
 	// Route to the matching probe channel by probe_id
 	c.probeResultsMu.Lock()
 	if rchan, ok := c.probeResponseChs[resp.ProbeId]; ok {
 		select {
-		case rchan <- probeResponseData{af: af, channel: ch, peerID: types.ClientID(peerID), srcTimestamp: resp.SrcTimestamp, dstTimestamp: resp.DstTimestamp}:
+		case rchan <- probeResponseData{af: af, pair: types.ChannelPair{Local: local, Peer: peer}, peerID: types.ClientID(peerID), srcTimestamp: resp.SrcTimestamp, dstTimestamp: resp.DstTimestamp}:
 		default:
 		}
 	}
@@ -220,17 +234,17 @@ func (c *Client) handleProbeResponse(af types.AFName, ch types.ChannelName, peer
 
 type probeResponseData struct {
 	af           types.AFName
-	channel      types.ChannelName
+	pair         types.ChannelPair
 	peerID       types.ClientID
 	srcTimestamp int64 // original sender's timestamp (echoed back)
 	dstTimestamp int64 // responder's timestamp when received
 }
 
-// latKey is a per-(peer, af, channel) probe key used in executeProbe.
+// latKey is a per-(peer, af, channel pair) probe key used in executeProbe.
 type latKey struct {
 	clientID types.ClientID
 	af       types.AFName
-	channel  types.ChannelName
+	pair     types.ChannelPair
 }
 
 // executeProbe runs a full probe cycle as requested by the controller.
@@ -282,69 +296,68 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	sent := make(map[latKey]int)
 	var latMu sync.Mutex
 
-	// Send probes
+	// Send probes: every local channel probes every peer channel in the same
+	// AF. Channel names are per-node labels, so no name matching is assumed —
+	// the (local, peer) pair identifies the link being measured.
 	for i := 0; i < probeTimes; i++ {
 		if i > 0 {
 			time.Sleep(inProbeInterval)
 		}
 
-		srcTimestamp := c.ntp.Now().UnixNano()
-
-		probeReq := &pb.ProbeRequest{
-			ProbeId:      probeID,
-			SrcTimestamp: srcTimestamp,
-		}
-		probeReqData, _ := proto.Marshal(probeReq)
-
 		for _, peer := range peers {
 			for af, chans := range c.probeConns {
-				for ch, probeConn := range chans {
+				for lch, probeConn := range chans {
 					selfChans, selfHasAF := c.Config.AFSettings[af]
 					if !selfHasAF {
 						continue
 					}
-					if _, ok := selfChans[ch]; !ok {
+					if _, ok := selfChans[lch]; !ok {
 						continue
 					}
 					peerChans, peerHasAF := peer.info.Endpoints[af]
 					if !peerHasAF {
 						continue
 					}
-					peerEP, peerHasCh := peerChans[ch]
-					if !peerHasCh {
-						continue
-					}
+					for pch, peerEP := range peerChans {
+						// Expire stale session (no successful decrypt for 30-45s).
+						// Jitter derived from our own ClientID byte so each client
+						// gets a different but stable expiry, avoiding synchronized
+						// re-handshake collisions.
+						jitter := int(c.ClientID[0]) * 15000 / 256
+						expiry := 30*time.Second + time.Duration(jitter)*time.Millisecond
+						c.probeSessions.ExpireByPeer(peer.clientID, expiry)
 
-					// Expire stale session (no successful decrypt for 30-45s).
-					// Jitter derived from our own ClientID byte so each client
-					// gets a different but stable expiry, avoiding synchronized
-					// re-handshake collisions.
-					jitter := int(c.ClientID[0]) * 15000 / 256
-					expiry := 30*time.Second + time.Duration(jitter)*time.Millisecond
-					c.probeSessions.ExpireByPeer(peer.clientID, expiry)
-
-					// Ensure we have a probe session with this peer
-					session := c.probeSessions.FindByPeer(peer.clientID)
-					if session == nil {
-						c.initiateProbeHandshake(af, ch, peer.clientID, peerEP)
-						time.Sleep(100 * time.Millisecond)
-						session = c.probeSessions.FindByPeer(peer.clientID)
+						// Ensure we have a probe session with this peer
+						session := c.probeSessions.FindByPeer(peer.clientID)
 						if session == nil {
-							continue
+							c.initiateProbeHandshake(af, lch, peer.clientID, peerEP)
+							time.Sleep(100 * time.Millisecond)
+							session = c.probeSessions.FindByPeer(peer.clientID)
+							if session == nil {
+								continue
+							}
 						}
+
+						addr := &net.UDPAddr{
+							IP:   peerEP.IP.AsSlice(),
+							Port: int(peerEP.ProbePort),
+						}
+
+						probeReq := &pb.ProbeRequest{
+							ProbeId:        probeID,
+							SrcTimestamp:   c.ntp.Now().UnixNano(),
+							SrcChannelName: string(lch),
+							DstChannelName: string(pch),
+						}
+						probeReqData, _ := proto.Marshal(probeReq)
+
+						latMu.Lock()
+						key := latKey{clientID: peer.clientID, af: af, pair: types.ChannelPair{Local: lch, Peer: pch}}
+						sent[key]++
+						latMu.Unlock()
+
+						protocol.WriteUDPPacket(probeConn, addr, session, protocol.MsgProbeRequest, probeReqData)
 					}
-
-					addr := &net.UDPAddr{
-						IP:   peerEP.IP.AsSlice(),
-						Port: int(peerEP.ProbePort),
-					}
-
-					latMu.Lock()
-					key := latKey{clientID: peer.clientID, af: af, channel: ch}
-					sent[key]++
-					latMu.Unlock()
-
-					protocol.WriteUDPPacket(probeConn, addr, session, protocol.MsgProbeRequest, probeReqData)
 				}
 			}
 		}
@@ -361,7 +374,7 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			// end-to-end path, so routing correctness is preserved.
 			latency := float64(resp.dstTimestamp-resp.srcTimestamp) / 1e6 // ms
 
-			key := latKey{clientID: resp.peerID, af: resp.af, channel: resp.channel}
+			key := latKey{clientID: resp.peerID, af: resp.af, pair: resp.pair}
 			latMu.Lock()
 			latencies[key] = append(latencies[key], latency)
 			latMu.Unlock()
@@ -375,11 +388,11 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	// Log collected latencies
 	latMu.Lock()
 	for key, lats := range latencies {
-		vlog.Debugf("[Client] probe results: peer=%s af=%s channel=%s latencies=%v sent=%d", key.clientID.Hex()[:8], key.af, key.channel, lats, sent[key])
+		vlog.Debugf("[Client] probe results: peer=%s af=%s channel=%s>%s latencies=%v sent=%d", key.clientID.Hex()[:8], key.af, key.pair.Local, key.pair.Peer, lats, sent[key])
 	}
 	for key, s := range sent {
 		if _, ok := latencies[key]; !ok {
-			vlog.Debugf("[Client] probe results: peer=%s af=%s channel=%s NO RESPONSES sent=%d", key.clientID.Hex()[:8], key.af, key.channel, s)
+			vlog.Debugf("[Client] probe results: peer=%s af=%s channel=%s>%s NO RESPONSES sent=%d", key.clientID.Hex()[:8], key.af, key.pair.Local, key.pair.Peer, s)
 		}
 	}
 	latMu.Unlock()
@@ -397,54 +410,53 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			if !peerHasAF {
 				continue
 			}
-			for ch, cc := range chans {
-				if _, peerHasCh := peerChans[ch]; !peerHasCh {
-					continue
-				}
+			for lch, cc := range chans {
+				for pch := range peerChans {
+					key := latKey{clientID: peer.clientID, af: af, pair: types.ChannelPair{Local: lch, Peer: pch}}
 
-				key := latKey{clientID: peer.clientID, af: af, channel: ch}
+					latMu.Lock()
+					lats := latencies[key]
+					sentCount := sent[key]
+					latMu.Unlock()
 
-				latMu.Lock()
-				lats := latencies[key]
-				sentCount := sent[key]
-				latMu.Unlock()
-
-				pbr := &pb.AFProbeResult{
-					AfName:      string(af),
-					ChannelName: string(ch),
-					Priority:    int32(cc.Priority),
-					ForwardCost: cc.ForwardCost,
-				}
-				afr := &LocalAFProbeResult{}
-
-				if sentCount == 0 || len(lats) == 0 {
-					pbr.LatencyMean = types.INF_LATENCY
-					pbr.PacketLoss = 1.0
-					afr.LatencyMean = types.INF_LATENCY
-					afr.PacketLoss = 1.0
-				} else {
-					var sum float64
-					for _, l := range lats {
-						sum += l
+					pbr := &pb.AFProbeResult{
+						AfName:          string(af),
+						ChannelName:     string(lch),
+						PeerChannelName: string(pch),
+						Priority:        int32(cc.Priority),
+						ForwardCost:     cc.ForwardCost,
 					}
-					mean := sum / float64(len(lats))
-					var variance float64
-					for _, l := range lats {
-						diff := l - mean
-						variance += diff * diff
+					afr := &LocalAFProbeResult{}
+
+					if sentCount == 0 || len(lats) == 0 {
+						pbr.LatencyMean = types.INF_LATENCY
+						pbr.PacketLoss = 1.0
+						afr.LatencyMean = types.INF_LATENCY
+						afr.PacketLoss = 1.0
+					} else {
+						var sum float64
+						for _, l := range lats {
+							sum += l
+						}
+						mean := sum / float64(len(lats))
+						var variance float64
+						for _, l := range lats {
+							diff := l - mean
+							variance += diff * diff
+						}
+						std := math.Sqrt(variance / float64(len(lats)))
+						loss := 1.0 - float64(len(lats))/float64(sentCount)
+
+						pbr.LatencyMean = mean
+						pbr.LatencyStd = std
+						pbr.PacketLoss = loss
+						afr.LatencyMean = mean
+						afr.LatencyStd = std
+						afr.PacketLoss = loss
 					}
-					std := math.Sqrt(variance / float64(len(lats)))
-					loss := 1.0 - float64(len(lats))/float64(sentCount)
 
-					pbr.LatencyMean = mean
-					pbr.LatencyStd = std
-					pbr.PacketLoss = loss
-					afr.LatencyMean = mean
-					afr.LatencyStd = std
-					afr.PacketLoss = loss
+					rawResults[key] = &rawAFResult{result: pbr, local: afr}
 				}
-
-				rawResults[key] = &rawAFResult{result: pbr, local: afr}
 			}
 		}
 	}
@@ -461,7 +473,7 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		if !ok {
 			continue
 		}
-		cc, ok := chans[key.channel]
+		cc, ok := chans[key.pair.Local]
 		if !ok {
 			continue
 		}
@@ -472,7 +484,7 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			continue
 		}
 
-		hk := probeHistoryKey{ClientID: key.clientID, AF: key.af, Channel: key.channel}
+		hk := probeHistoryKey{ClientID: key.clientID, AF: key.af, Pair: key.pair}
 		history := c.probeHistory[hk]
 
 		history = append(history, raw.local)
@@ -505,13 +517,14 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		medianEntry := history[reachable[len(reachable)/2].idx]
 
 		dbPb := &pb.AFProbeResult{
-			AfName:      string(key.af),
-			ChannelName: string(key.channel),
-			LatencyMean: medianEntry.LatencyMean,
-			LatencyStd:  medianEntry.LatencyStd,
-			PacketLoss:  medianEntry.PacketLoss,
-			Priority:    int32(cc.Priority),
-			ForwardCost: cc.ForwardCost,
+			AfName:          string(key.af),
+			ChannelName:     string(key.pair.Local),
+			PeerChannelName: string(key.pair.Peer),
+			LatencyMean:     medianEntry.LatencyMean,
+			LatencyStd:      medianEntry.LatencyStd,
+			PacketLoss:      medianEntry.PacketLoss,
+			Priority:        int32(cc.Priority),
+			ForwardCost:     cc.ForwardCost,
 		}
 		dbLocal := &LocalAFProbeResult{
 			LatencyMean: medianEntry.LatencyMean,
@@ -521,40 +534,33 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		debouncedResults[key] = &rawAFResult{result: dbPb, local: dbLocal}
 	}
 
-	// (af, channel) hysteresis + final cost computation
+	// (af, channel pair) hysteresis + final cost computation
 	switchCost := c.Config.AFSwitchCost
 	for _, peer := range peers {
 		// Step 1: compute base cost (quality_cost + forward_cost + per-rule
-		// channel_additional_cost, without switch_cost) per (af, channel).
+		// channel_additional_cost, without switch_cost) per (af, pair).
 		type afChEntry struct {
-			af         types.AFName
-			channel    types.ChannelName
-			baseCost   float64 // includes channel_additional_cost
-			extraCost  float64 // the channel_additional_cost portion alone
+			af        types.AFName
+			pair      types.ChannelPair
+			baseCost  float64 // includes channel_additional_cost
+			extraCost float64 // the channel_additional_cost portion alone
 		}
 		var reachable []afChEntry
-		for af, chans := range c.Config.AFSettings {
-			for ch := range chans {
-				key := latKey{clientID: peer.clientID, af: af, channel: ch}
-				db, ok := debouncedResults[key]
-				if !ok || db.local.PacketLoss >= 1.0 {
-					continue
-				}
-				qualityCost := db.local.LatencyMean
-				extraCost := c.lookupChannelAdditionalCost(peer.info, af, ch)
-				baseCost := qualityCost + db.result.ForwardCost + extraCost
-				reachable = append(reachable, afChEntry{af: af, channel: ch, baseCost: baseCost, extraCost: extraCost})
+		for key, db := range debouncedResults {
+			if key.clientID != peer.clientID || db.local.PacketLoss >= 1.0 {
+				continue
 			}
+			qualityCost := db.local.LatencyMean
+			extraCost := c.lookupChannelAdditionalCost(peer.info, key.af, key.pair.Peer)
+			baseCost := qualityCost + db.result.ForwardCost + extraCost
+			reachable = append(reachable, afChEntry{af: key.af, pair: key.pair, baseCost: baseCost, extraCost: extraCost})
 		}
 
 		if len(reachable) == 0 {
 			// All unreachable — set final_cost = INF on debounced results
-			for af, chans := range c.Config.AFSettings {
-				for ch := range chans {
-					key := latKey{clientID: peer.clientID, af: af, channel: ch}
-					if db, ok := debouncedResults[key]; ok {
-						db.result.FinalCost = types.INF_LATENCY
-					}
+			for key, db := range debouncedResults {
+				if key.clientID == peer.clientID {
+					db.result.FinalCost = types.INF_LATENCY
 				}
 			}
 			continue
@@ -568,21 +574,21 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 			}
 		}
 
-		// Step 3: preferred (af, channel) hysteresis based on base cost
+		// Step 3: preferred (af, channel pair) hysteresis based on base cost
 		curPref, hasPref := c.preferredAFChannel[peer.clientID]
 		if !hasPref || curPref.AF == "" {
-			c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Channel: best.channel}
+			c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Pair: best.pair}
 		} else {
-			prefKey := latKey{clientID: peer.clientID, af: curPref.AF, channel: curPref.Channel}
+			prefKey := latKey{clientID: peer.clientID, af: curPref.AF, pair: curPref.Pair}
 			prefDB, prefOK := debouncedResults[prefKey]
 			if !prefOK || prefDB.local.PacketLoss >= 1.0 {
-				c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Channel: best.channel}
+				c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Pair: best.pair}
 			} else {
 				prefQuality := prefDB.local.LatencyMean
-				prefExtra := c.lookupChannelAdditionalCost(peer.info, curPref.AF, curPref.Channel)
+				prefExtra := c.lookupChannelAdditionalCost(peer.info, curPref.AF, curPref.Pair.Peer)
 				prefBaseCost := prefQuality + prefDB.result.ForwardCost + prefExtra
 				if prefBaseCost-best.baseCost > switchCost {
-					c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Channel: best.channel}
+					c.preferredAFChannel[peer.clientID] = AFChannel{AF: best.af, Pair: best.pair}
 				}
 			}
 		}
@@ -592,24 +598,20 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 		// controller's Floyd-Warshall and every other client see the same
 		// asymmetric cost we use locally for hysteresis.
 		pref := c.preferredAFChannel[peer.clientID]
-		for af, chans := range c.Config.AFSettings {
-			for ch := range chans {
-				key := latKey{clientID: peer.clientID, af: af, channel: ch}
-				db, ok := debouncedResults[key]
-				if !ok {
-					continue
-				}
-				qualityCost := db.local.LatencyMean
-				extraCost := c.lookupChannelAdditionalCost(peer.info, af, ch)
-				baseCost := qualityCost + db.result.ForwardCost + extraCost
-				db.result.QualityCost = qualityCost
-				if af == pref.AF && ch == pref.Channel {
-					db.result.SwitchCost = 0
-					db.result.FinalCost = baseCost
-				} else {
-					db.result.SwitchCost = switchCost
-					db.result.FinalCost = baseCost + switchCost
-				}
+		for key, db := range debouncedResults {
+			if key.clientID != peer.clientID {
+				continue
+			}
+			qualityCost := db.local.LatencyMean
+			extraCost := c.lookupChannelAdditionalCost(peer.info, key.af, key.pair.Peer)
+			baseCost := qualityCost + db.result.ForwardCost + extraCost
+			db.result.QualityCost = qualityCost
+			if key.af == pref.AF && key.pair == pref.Pair {
+				db.result.SwitchCost = 0
+				db.result.FinalCost = baseCost
+			} else {
+				db.result.SwitchCost = switchCost
+				db.result.FinalCost = baseCost + switchCost
 			}
 		}
 	}
@@ -626,23 +628,17 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	for _, peer := range peers {
 		entry := &pb.ProbeResultEntry{}
 
-		for af, chans := range c.Config.AFSettings {
-			peerChans, peerHasAF := peer.info.Endpoints[af]
-			if !peerHasAF {
+		for key, raw := range rawResults {
+			if key.clientID != peer.clientID {
 				continue
 			}
-			for ch := range chans {
-				if _, peerHasCh := peerChans[ch]; !peerHasCh {
-					continue
-				}
-				key := latKey{clientID: peer.clientID, af: af, channel: ch}
-				if raw, ok := rawResults[key]; ok {
-					entry.AfResults = append(entry.AfResults, raw.result)
-				}
-				if db, ok := debouncedResults[key]; ok {
-					entry.DebouncedAfResults = append(entry.DebouncedAfResults, db.result)
-				}
+			entry.AfResults = append(entry.AfResults, raw.result)
+		}
+		for key, db := range debouncedResults {
+			if key.clientID != peer.clientID {
+				continue
 			}
+			entry.DebouncedAfResults = append(entry.DebouncedAfResults, db.result)
 		}
 
 		results.Results[peer.clientID.Hex()] = entry
@@ -654,31 +650,25 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 	c.lastProbeResults = make(map[types.ClientID]*LocalProbeResult)
 	c.lastDebouncedResults = make(map[types.ClientID]*LocalProbeResult)
 	for _, peer := range peers {
-		lpr := &LocalProbeResult{AFResults: make(map[types.AFName]map[types.ChannelName]*LocalAFProbeResult)}
-		dlpr := &LocalProbeResult{AFResults: make(map[types.AFName]map[types.ChannelName]*LocalAFProbeResult)}
-		for af, chans := range c.Config.AFSettings {
-			peerChans, peerHasAF := peer.info.Endpoints[af]
-			if !peerHasAF {
+		lpr := &LocalProbeResult{AFResults: make(map[types.AFName]map[types.ChannelPair]*LocalAFProbeResult)}
+		dlpr := &LocalProbeResult{AFResults: make(map[types.AFName]map[types.ChannelPair]*LocalAFProbeResult)}
+		for key, raw := range rawResults {
+			if key.clientID != peer.clientID {
 				continue
 			}
-			for ch := range chans {
-				if _, peerHasCh := peerChans[ch]; !peerHasCh {
-					continue
-				}
-				key := latKey{clientID: peer.clientID, af: af, channel: ch}
-				if raw, ok := rawResults[key]; ok {
-					if _, ok := lpr.AFResults[af]; !ok {
-						lpr.AFResults[af] = make(map[types.ChannelName]*LocalAFProbeResult)
-					}
-					lpr.AFResults[af][ch] = raw.local
-				}
-				if db, ok := debouncedResults[key]; ok {
-					if _, ok := dlpr.AFResults[af]; !ok {
-						dlpr.AFResults[af] = make(map[types.ChannelName]*LocalAFProbeResult)
-					}
-					dlpr.AFResults[af][ch] = db.local
-				}
+			if _, ok := lpr.AFResults[key.af]; !ok {
+				lpr.AFResults[key.af] = make(map[types.ChannelPair]*LocalAFProbeResult)
 			}
+			lpr.AFResults[key.af][key.pair] = raw.local
+		}
+		for key, db := range debouncedResults {
+			if key.clientID != peer.clientID {
+				continue
+			}
+			if _, ok := dlpr.AFResults[key.af]; !ok {
+				dlpr.AFResults[key.af] = make(map[types.ChannelPair]*LocalAFProbeResult)
+			}
+			dlpr.AFResults[key.af][key.pair] = db.local
 		}
 		c.lastProbeResults[peer.clientID] = lpr
 		c.lastDebouncedResults[peer.clientID] = dlpr

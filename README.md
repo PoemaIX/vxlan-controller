@@ -109,6 +109,29 @@ nodes:
       ISP2: 10.2.1.1
 ```
 
+Channel names are **per-node labels** — they do not need to match between
+nodes. Every local channel probes every channel of every peer in the same AF
+(full cross-product), routing picks the lowest-latency `(local, peer)` pair per
+peer, and each client channel is given every controller address in its AF
+(connections rotate to the next address on failure). Two nodes can therefore
+name their uplinks `seednet`/`homeplus` and `hinet` and still form a full mesh.
+
+**Controller selection**: each `controllers:` entry is `<node>`,
+`<node>/<channel>`, or `<node>/<af>/<channel>`:
+
+```yaml
+controllers:
+  - hub                 # every channel of hub is a controller endpoint
+  - siteB/wan1          # only siteB's wan1 uplink (in every AF that has it)
+  - siteC/v4/dsl        # only siteC's v4 dsl uplink
+```
+
+Only the selected channels become controller listeners and client-visible
+endpoints; the node's other channels stay client-only and need no public
+address (useful when one uplink is `autoip_interface` without DDNS). Entries
+are validated — bare `<node>` still requires every channel to have a reachable
+endpoint. The list order is the order clients try controller addresses.
+
 ## Key Generation
 
 Compatible with WireGuard key format:
@@ -272,6 +295,9 @@ Integration tests require root (network namespaces), except `test_multichannel_a
 | 8 | `test_no_flood.sh` | Unknown unicast suppression (no flood) |
 | 9 | `test_firewall.sh` | VXLAN injection protection (nftables) |
 | 10 | `compare_static_vs_controller.sh` | Benchmark: static FDB vs controller-driven |
+| 11 | `test_crosschannel_connectivity.sh` | Per-node channel names: cross-name pairing, lowest-latency selection, controller addr rotation (startup + mid-run) |
+| 12 | `test_latency_reroute.sh` | Latency-driven multi-hop reroute through a transit node and back |
+| 13 | `test_seamless_failover.sh` | Continuous-ping loss bounds across controller loss, path switches, latency blips |
 
 ```bash
 # Run all tests

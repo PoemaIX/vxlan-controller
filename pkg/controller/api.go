@@ -124,7 +124,7 @@ func (c *Controller) apiCostGet() (*CostGetResult, error) {
 							}
 						}
 					}
-					result.Matrix[srcName][dstName][string(af)][string(ch)] = info
+					result.Matrix[srcName][dstName][string(af)][string(ch.Local)+">"+string(ch.Peer)] = info
 				}
 			}
 		}
@@ -195,7 +195,13 @@ func (c *Controller) apiCostStore() (interface{}, error) {
 					if nameCosts[srcName][dstName][string(af)] == nil {
 						nameCosts[srcName][dstName][string(af)] = make(map[string]float64)
 					}
-					nameCosts[srcName][dstName][string(af)][string(ch)] = al.QualityCost + al.ForwardCost
+					// static_costs are keyed by the src node's local channel;
+					// several peer channels share it — keep the cheapest.
+					cost := al.QualityCost + al.ForwardCost
+					lch := string(ch.Local)
+					if old, ok := nameCosts[srcName][dstName][string(af)][lch]; !ok || cost < old {
+						nameCosts[srcName][dstName][string(af)][lch] = cost
+					}
 				}
 			}
 		}

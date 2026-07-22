@@ -11,9 +11,11 @@
 - ChannelName 型別在 `pkg/types`，`DefaultChannelName = "ISP1"`。
 - `vxlan_name` 必須跨所有 (af, channel) 全域唯一（預設 `<prefix><af>-<channel>`，例如 `vxlan-v4-ISP1`）。
 - bind_addr / autoip_interface 必須在同一個 AF 內互異。
-- handshake 訊息帶 `channel_name`，Controller 嚴格比對 (af, channel) slot，不跨 channel 混用 session。
-- Floyd-Warshall 成本計算與 route matrix 在 (af, channel) 粒度跑，`RouteMatrixCell` 帶 `channel_name`。
-- CLI 輸出所有 AF label 全部改成 `af/channel` 格式（例如 `v4/ISP1`）。
+- **Channel 名稱是各節點自己的 uplink 標籤，跨節點不需要一致**。同一個 AF 內，本地每個 channel 會對每個 peer 的每個 channel 做 probe（全交叉組合），路由以 `(local, peer)` channel pair 為粒度選最低延遲的鏈路。
+- handshake 訊息帶 `channel_name`，Controller 只比對 AF；連線 slot 以 client 註冊的 channel 名稱為準（listener 的 channel 只代表 controller 自己的 uplink）。
+- 量測與路由的 key 是 `types.ChannelPair{Local, Peer}`：`AFProbeResult` 帶 `peer_channel_name`、`RouteMatrixCell` 帶 `channel_name`（本地端）+ `peer_channel_name`（下一跳端）。FDB 用本地 channel 選 vxlan device、用 peer channel 查下一跳 endpoint；當對端 channel 的 `vxlan_dst_port` 與本地 device 不同時，FDB entry 會帶 per-entry `port` override。
+- Client 的每個 channel 會拿到同 AF 內所有 controller 的所有位址，同一個 controller 只維持一條連線，失敗時輪替到下一個位址。
+- CLI 輸出所有 AF label 全部改成 `af/channel` 格式（例如 `v4/ISP1`）；成對量測顯示為 `af/local>peer`（例如 `v4/homeplus>hinet`）。
 - 單 channel 情境就是所有 AF 下放一個 `ISP1` channel，autogen 的 scalar / `{bind, ddns}` shorthand 會自動包成 `ISP1`。
 
 下文保留舊型別命名作為結構輪廓參考，實際程式碼以 `pkg/config`、`pkg/client`、`pkg/controller`、`pkg/types` 的當前定義為準。

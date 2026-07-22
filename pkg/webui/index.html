@@ -681,8 +681,9 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     return 'lat-bad';
   }
 
-  function afChanLabel(af, ch) {
+  function afChanLabel(af, ch, peerCh) {
     if (!af) return '';
+    if (ch && peerCh && peerCh !== ch) return af + '/' + ch + '>' + peerCh;
     if (ch) return af + '/' + ch;
     return af;
   }
@@ -793,8 +794,8 @@ tr:hover td { background: rgba(59,158,255,0.03); }
               src: nodeMap[sorted[0]], dst: nodeMap[sorted[1]],
               latFwd: fwd ? fwd.latency : null,
               latRev: rev ? rev.latency : null,
-              labelFwd: fwd ? afChanLabel(fwd.af, fwd.channel) : '',
-              labelRev: rev ? afChanLabel(rev.af, rev.channel) : '',
+              labelFwd: fwd ? afChanLabel(fwd.af, fwd.channel, fwd.peer_channel) : '',
+              labelRev: rev ? afChanLabel(rev.af, rev.channel, rev.peer_channel) : '',
             });
           }
         });
@@ -975,7 +976,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
         } else {
           const e = latMap[src.id+'|'+dst.id];
           if (e && e.latency != null && e.latency < 1e15) {
-            const label = afChanLabel(e.af, e.channel);
+            const label = afChanLabel(e.af, e.channel, e.peer_channel);
             const afPart = label ? '<span style="color:var(--text3);margin-right:4px">'+label+'</span>' : '';
             h += '<td class="lat-cell '+latClass(e.latency)+'">'+afPart+'<span>'+e.latency.toFixed(1)+'</span></td>';
           } else {
@@ -1003,7 +1004,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     (state.route_matrix||[]).forEach(row => {
       if (!nhMap[row.src]) nhMap[row.src] = {};
       (row.entries||[]).forEach(e => {
-        nhMap[row.src][e.dst] = { next_hop: e.next_hop, af: e.af, channel: e.channel };
+        nhMap[row.src][e.dst] = { next_hop: e.next_hop, af: e.af, channel: e.channel, peer_channel: e.peer_channel };
       });
     });
 

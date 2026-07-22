@@ -23,6 +23,9 @@ TESTS=(
     "test_multichannel_recovery.sh"
     "test_multichannel_extracost.sh"
     "test_multichannel_ratelimit.sh"
+    "test_crosschannel_connectivity.sh"
+    "test_latency_reroute.sh"
+    "test_seamless_failover.sh"
 )
 
 total=0
