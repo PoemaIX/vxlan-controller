@@ -11,7 +11,10 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"vxlan-controller/pkg/vlog"
 
@@ -123,6 +126,12 @@ type ControllerConn struct {
 	remoteSessionID string
 	remoteSeqid     uint64
 	lastProbeID     uint64
+
+	// lastRecvNano is the unix-nano time of the last message received from
+	// this controller on any (af, channel). Updated lock-free on the recv
+	// hot path; read by the sync-status API to spot a stalled connection
+	// (alive TCP, no updates flowing).
+	lastRecvNano atomic.Int64
 }
 
 // ClientAFConn represents a single (AF, channel) connection to a controller.
@@ -136,12 +145,12 @@ type ClientAFConn struct {
 	// CtrlAddr is the controller address this conn dialed — a controller may
 	// have several addresses, so UDP (broadcast relay) must target the one
 	// actually in use, not the first configured.
-	CtrlAddr    netip.AddrPort
-	Cancel      context.CancelFunc
-	Connected   bool
-	Done        chan struct{}
-	Cleaned     chan struct{}
-	doneOnce    sync.Once
+	CtrlAddr  netip.AddrPort
+	Cancel    context.CancelFunc
+	Connected bool
+	Done      chan struct{}
+	Cleaned   chan struct{}
+	doneOnce  sync.Once
 }
 
 // CloseDone safely closes the Done channel (idempotent).
@@ -761,6 +770,9 @@ func (c *Client) tcpRecvLoop(ctrlID types.ControllerID, af types.AFName, ch type
 			}
 			return
 		}
+		if cc := c.Controllers[ctrlID]; cc != nil {
+			cc.lastRecvNano.Store(time.Now().UnixNano())
+		}
 
 		switch msgType {
 		case protocol.MsgControllerState:
@@ -1189,9 +1201,177 @@ func (c *Client) handleAPI(method string, params json.RawMessage) (interface{}, 
 		return c.apiShowController()
 	case "show.route":
 		return c.apiShowRoute(params)
+	case "show.sync":
+		return c.apiSyncStatus()
+	case "show.diff":
+		return c.apiViewDiff()
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
+}
+
+// SyncStatusEntry reports one controller connection's sync health.
+type SyncStatusEntry struct {
+	ControllerID    string          `json:"controller_id"`
+	IsAuthority     bool            `json:"is_authority"`
+	Synced          bool            `json:"synced"`
+	MACsSynced      bool            `json:"macs_synced"`
+	ActiveAF        string          `json:"active_af"`
+	ActiveChannel   string          `json:"active_channel"`
+	LocalSessionID  string          `json:"local_session_id"`  // session we send under
+	LocalSeqid      uint64          `json:"local_seqid"`       // last seqid we sent
+	RemoteSessionID string          `json:"remote_session_id"` // session controller echoes
+	RemoteSeqid     uint64          `json:"remote_seqid"`      // last seqid controller echoed
+	LastRecvAgoMs   int64           `json:"last_recv_ago_ms"`  // -1 = never
+	ViewClients     int             `json:"view_clients"`
+	Conns           []SyncConnState `json:"conns"`
+}
+
+type SyncConnState struct {
+	AF        string `json:"af"`
+	Channel   string `json:"channel"`
+	Connected bool   `json:"connected"`
+}
+
+func (c *Client) apiSyncStatus() ([]SyncStatusEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	var out []SyncStatusEntry
+	for ctrlID, cc := range c.Controllers {
+		e := SyncStatusEntry{
+			ControllerID:  ctrlID.Hex()[:16],
+			IsAuthority:   c.AuthorityCtrl != nil && *c.AuthorityCtrl == ctrlID,
+			Synced:        cc.Synced,
+			MACsSynced:    cc.MACsSynced,
+			ActiveAF:      string(cc.ActiveAF),
+			ActiveChannel: string(cc.ActiveChannel),
+			LastRecvAgoMs: -1,
+		}
+		cc.syncMu.Lock()
+		e.LocalSessionID = shortSess(cc.localSessionID)
+		e.LocalSeqid = cc.localSeqid
+		e.RemoteSessionID = shortSess(cc.remoteSessionID)
+		e.RemoteSeqid = cc.remoteSeqid
+		cc.syncMu.Unlock()
+		if n := cc.lastRecvNano.Load(); n > 0 {
+			e.LastRecvAgoMs = now.Sub(time.Unix(0, n)).Milliseconds()
+		}
+		if cc.State != nil {
+			e.ViewClients = len(cc.State.Clients)
+		}
+		for af, chans := range cc.AFConns {
+			for ch, afc := range chans {
+				e.Conns = append(e.Conns, SyncConnState{
+					AF: string(af), Channel: string(ch), Connected: afc != nil && afc.Connected,
+				})
+			}
+		}
+		sort.Slice(e.Conns, func(i, j int) bool {
+			return e.Conns[i].AF+e.Conns[i].Channel < e.Conns[j].AF+e.Conns[j].Channel
+		})
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ControllerID < out[j].ControllerID })
+	return out, nil
+}
+
+func shortSess(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
+// ViewDiffEntry is one peer client whose per-controller fingerprints disagree.
+// The client holds every controller's view, so a mismatch here is direct
+// evidence the controllers are out of sync with each other.
+type ViewDiffEntry struct {
+	ClientName   string            `json:"client_name"`
+	ClientID     string            `json:"client_id"`
+	Fingerprints map[string]string `json:"fingerprints"` // controller_id -> fingerprint
+	Mismatch     bool              `json:"mismatch"`
+}
+
+func (c *Client) apiViewDiff() ([]ViewDiffEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// controllers that carry a view
+	type ctrlView struct {
+		id   string
+		view *ControllerView
+	}
+	var ctrls []ctrlView
+	for id, cc := range c.Controllers {
+		if cc.State != nil {
+			ctrls = append(ctrls, ctrlView{id.Hex()[:16], cc.State})
+		}
+	}
+	sort.Slice(ctrls, func(i, j int) bool { return ctrls[i].id < ctrls[j].id })
+
+	// union of all client ids seen by any controller
+	allClients := map[types.ClientID]string{}
+	for _, cv := range ctrls {
+		for id, ci := range cv.view.Clients {
+			allClients[id] = ci.ClientName
+		}
+	}
+
+	var out []ViewDiffEntry
+	for cid, name := range allClients {
+		fps := map[string]string{}
+		for _, cv := range ctrls {
+			fps[cv.id] = clientFingerprint(cv.view, c.ClientID, cid)
+		}
+		// mismatch if any two controllers disagree
+		var first string
+		mismatch := false
+		firstSet := false
+		for _, cv := range ctrls {
+			f := fps[cv.id]
+			if !firstSet {
+				first = f
+				firstSet = true
+			} else if f != first {
+				mismatch = true
+			}
+		}
+		if name == "" {
+			name = cid.Hex()[:8]
+		}
+		out = append(out, ViewDiffEntry{
+			ClientName: name, ClientID: cid.Hex()[:16], Fingerprints: fps, Mismatch: mismatch,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ClientName < out[j].ClientName })
+	return out, nil
+}
+
+// clientFingerprint summarizes one controller's view of a client: its
+// endpoints, route count, and this node's route to it. Two controllers that
+// agree produce identical strings; "absent" means that controller doesn't
+// know the client at all.
+func clientFingerprint(view *ControllerView, selfID, cid types.ClientID) string {
+	ci, ok := view.Clients[cid]
+	if !ok {
+		return "absent"
+	}
+	var eps []string
+	for af, chans := range ci.Endpoints {
+		for ch, ep := range chans {
+			eps = append(eps, fmt.Sprintf("%s/%s=%s", af, ch, ep.IP))
+		}
+	}
+	sort.Strings(eps)
+	route := "none"
+	if myRoutes, ok := view.RouteMatrix[selfID]; ok {
+		if re, ok := myRoutes[cid]; ok {
+			route = fmt.Sprintf("%s:%s/%s>%s", re.NextHop.Hex()[:6], re.AF, re.Channel, re.PeerChannel)
+		}
+	}
+	return fmt.Sprintf("eps=[%s] routes=%d route=%s", strings.Join(eps, ","), len(ci.Routes), route)
 }
 
 type afInfo struct {

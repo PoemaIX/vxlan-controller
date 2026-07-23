@@ -101,6 +101,11 @@ type ClientConn struct {
 
 	LastClientSessionID string
 	LastClientSeqid     uint64
+
+	// LastRecvAt is when the last message was received from this client on
+	// any (af, channel). Read by the sync-status API to spot a stalled
+	// client connection (alive socket, nothing flowing). Guarded by c.mu.
+	LastRecvAt time.Time
 }
 
 // AFConn represents a single (AF, channel) TCP connection to a client.

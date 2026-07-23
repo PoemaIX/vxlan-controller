@@ -81,6 +81,10 @@ func runVxccli(sockPath string, args []string) {
 			} else {
 				vxccliShowRoute(sockPath, "")
 			}
+		case "sync":
+			vxccliShowSync(sockPath)
+		case "diff":
+			vxccliShowDiff(sockPath)
 		default:
 			vxccliUsage()
 			os.Exit(1)
@@ -102,6 +106,123 @@ func vxccliUsage() {
 	fmt.Fprintln(os.Stderr, "  af get <af> [channel]              Get bind address for an (af, channel)")
 	fmt.Fprintln(os.Stderr, "  af set <af> [channel] <addr>       Set bind address (non-autoip only)")
 	fmt.Fprintln(os.Stderr, "  peer list                          List peers with endpoints and probe results")
+	fmt.Fprintln(os.Stderr, "  show sync                          Per-controller sync health (seqid, last-recv age, conns)")
+	fmt.Fprintln(os.Stderr, "  show diff                          Cross-controller view diff (detects controllers out of sync)")
+}
+
+type syncStatusEntry struct {
+	ControllerID    string `json:"controller_id"`
+	IsAuthority     bool   `json:"is_authority"`
+	Synced          bool   `json:"synced"`
+	MACsSynced      bool   `json:"macs_synced"`
+	ActiveAF        string `json:"active_af"`
+	ActiveChannel   string `json:"active_channel"`
+	LocalSessionID  string `json:"local_session_id"`
+	LocalSeqid      uint64 `json:"local_seqid"`
+	RemoteSessionID string `json:"remote_session_id"`
+	RemoteSeqid     uint64 `json:"remote_seqid"`
+	LastRecvAgoMs   int64  `json:"last_recv_ago_ms"`
+	ViewClients     int    `json:"view_clients"`
+	Conns           []struct {
+		AF        string `json:"af"`
+		Channel   string `json:"channel"`
+		Connected bool   `json:"connected"`
+	} `json:"conns"`
+}
+
+func agoStr(ms int64) string {
+	if ms < 0 {
+		return "never"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
+}
+
+func vxccliShowSync(sockPath string) {
+	raw, err := apisock.Call(sockPath, "show.sync", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	var result []syncStatusEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+	if len(result) == 0 {
+		fmt.Println("(no controllers)")
+		return
+	}
+	for _, e := range result {
+		auth := ""
+		if e.IsAuthority {
+			auth = " *authority"
+		}
+		flags := ""
+		if !e.Synced {
+			flags += " NOT-SYNCED"
+		}
+		if !e.MACsSynced {
+			flags += " MACs-NOT-SYNCED"
+		}
+		active := e.ActiveAF
+		if e.ActiveChannel != "" {
+			active += "/" + e.ActiveChannel
+		}
+		fmt.Printf("%s%s  active=%s  last_recv=%s  view_clients=%d%s\n",
+			e.ControllerID, auth, active, agoStr(e.LastRecvAgoMs), e.ViewClients, flags)
+		fmt.Printf("    tx: session=%s seqid=%d   rx-echo: session=%s seqid=%d\n",
+			e.LocalSessionID, e.LocalSeqid, e.RemoteSessionID, e.RemoteSeqid)
+		for _, cn := range e.Conns {
+			st := "down"
+			if cn.Connected {
+				st = "up"
+			}
+			fmt.Printf("    %s/%s: %s\n", cn.AF, cn.Channel, st)
+		}
+	}
+}
+
+type viewDiffEntry struct {
+	ClientName   string            `json:"client_name"`
+	ClientID     string            `json:"client_id"`
+	Fingerprints map[string]string `json:"fingerprints"`
+	Mismatch     bool              `json:"mismatch"`
+}
+
+func vxccliShowDiff(sockPath string) {
+	raw, err := apisock.Call(sockPath, "show.diff", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	var result []viewDiffEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+	mismatches := 0
+	for _, e := range result {
+		marker := "  ok"
+		if e.Mismatch {
+			marker = "MISMATCH"
+			mismatches++
+		}
+		fmt.Printf("[%s] %s\n", marker, e.ClientName)
+		if e.Mismatch {
+			for _, cid := range sortedKeys(e.Fingerprints) {
+				fmt.Printf("    %s: %s\n", cid, e.Fingerprints[cid])
+			}
+		}
+	}
+	if mismatches == 0 {
+		fmt.Printf("\nall %d clients consistent across controllers\n", len(result))
+	} else {
+		fmt.Printf("\n%d/%d clients MISMATCH across controllers\n", mismatches, len(result))
+		os.Exit(2)
+	}
 }
 
 type afInfoResult struct {
@@ -197,11 +318,11 @@ func vxccliAFSet(sockPath string, afName, channel, addr string) {
 }
 
 type peerListResult struct {
-	ClientID   string                          `json:"client_id"`
-	ClientName string                          `json:"client_name"`
-	Endpoints  map[string]*peerEndpointResult  `json:"endpoints"`
-	LastSeen   string                          `json:"last_seen"`
-	Probe      *peerProbeResult                `json:"probe,omitempty"`
+	ClientID   string                         `json:"client_id"`
+	ClientName string                         `json:"client_name"`
+	Endpoints  map[string]*peerEndpointResult `json:"endpoints"`
+	LastSeen   string                         `json:"last_seen"`
+	Probe      *peerProbeResult               `json:"probe,omitempty"`
 }
 
 type peerEndpointResult struct {
@@ -210,9 +331,9 @@ type peerEndpointResult struct {
 }
 
 type peerProbeResult struct {
-	Time               string                            `json:"time"`
-	AFResults          map[string]*peerAFProbeResultCLI  `json:"af_results"`
-	DebouncedAFResults map[string]*peerAFProbeResultCLI  `json:"debounced_af_results,omitempty"`
+	Time               string                           `json:"time"`
+	AFResults          map[string]*peerAFProbeResultCLI `json:"af_results"`
+	DebouncedAFResults map[string]*peerAFProbeResultCLI `json:"debounced_af_results,omitempty"`
 }
 
 type peerAFProbeResultCLI struct {
@@ -436,4 +557,3 @@ func vxccliShowRoute(sockPath string, ctrlID string) {
 		fmt.Printf("%-20s%s  via %s%s%s\n", r.MAC, ipStr, joinStrings(ownerNames, ", "), nhStr, fdbStr)
 	}
 }
-

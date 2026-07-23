@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -40,9 +41,86 @@ func (c *Controller) handleAPI(method string, params json.RawMessage) (interface
 		return c.apiShowClient()
 	case "show.route":
 		return c.apiShowRoute(params)
+	case "show.sync":
+		return c.apiSyncStatus()
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
+}
+
+// CtrlSyncEntry reports one client connection's sync health from the
+// controller's side — the mirror of the client's `show sync`.
+type CtrlSyncEntry struct {
+	ClientName    string          `json:"client_name"`
+	ClientID      string          `json:"client_id"`
+	Synced        bool            `json:"synced"`
+	ActiveAF      string          `json:"active_af"`
+	ActiveChannel string          `json:"active_channel"`
+	RecvSessionID string          `json:"recv_session_id"` // client's full-sync session
+	RecvSeqid     uint64          `json:"recv_seqid"`      // last MAC seqid from client
+	LastRecvAgoMs int64           `json:"last_recv_ago_ms"`
+	LastSeenAgoMs int64           `json:"last_seen_ago_ms"`
+	Conns         []CtrlConnState `json:"conns"`
+}
+
+type CtrlConnState struct {
+	AF        string `json:"af"`
+	Channel   string `json:"channel"`
+	ConnAgeMs int64  `json:"conn_age_ms"`
+}
+
+func (c *Controller) apiSyncStatus() ([]CtrlSyncEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	var out []CtrlSyncEntry
+	for id, cc := range c.clients {
+		e := CtrlSyncEntry{
+			ClientID:      id.Hex()[:16],
+			Synced:        cc.Synced,
+			ActiveAF:      string(cc.ActiveAF),
+			ActiveChannel: string(cc.ActiveChannel),
+			RecvSessionID: shortSess(cc.LastClientSessionID),
+			RecvSeqid:     cc.LastClientSeqid,
+			LastRecvAgoMs: -1,
+			LastSeenAgoMs: -1,
+		}
+		if ci, ok := c.State.Clients[id]; ok {
+			e.ClientName = ci.ClientName
+			if !ci.LastSeen.IsZero() {
+				e.LastSeenAgoMs = now.Sub(ci.LastSeen).Milliseconds()
+			}
+		}
+		if e.ClientName == "" {
+			e.ClientName = id.Hex()[:8]
+		}
+		if !cc.LastRecvAt.IsZero() {
+			e.LastRecvAgoMs = now.Sub(cc.LastRecvAt).Milliseconds()
+		}
+		for af, chans := range cc.AFConns {
+			for ch, afc := range chans {
+				age := int64(-1)
+				if afc != nil && !afc.ConnectedAt.IsZero() {
+					age = now.Sub(afc.ConnectedAt).Milliseconds()
+				}
+				e.Conns = append(e.Conns, CtrlConnState{AF: string(af), Channel: string(ch), ConnAgeMs: age})
+			}
+		}
+		sort.Slice(e.Conns, func(i, j int) bool {
+			return e.Conns[i].AF+e.Conns[i].Channel < e.Conns[j].AF+e.Conns[j].Channel
+		})
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ClientName < out[j].ClientName })
+	return out, nil
+}
+
+func shortSess(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // AFCostInfo is the per-(af, channel) cost data returned by cost.get.
@@ -68,7 +146,7 @@ type AFCostDebounced struct {
 // CostGetResult is the result of cost.get.
 // Matrix: [src_name][dst_name][af][channel] -> AFCostInfo
 type CostGetResult struct {
-	CostMode string                                                 `json:"cost_mode"`
+	CostMode string                                                  `json:"cost_mode"`
 	Matrix   map[string]map[string]map[string]map[string]*AFCostInfo `json:"matrix"`
 }
 
@@ -329,9 +407,9 @@ func (c *Controller) apiShowClient() ([]ShowClientEntry, error) {
 
 // ShowRouteEntry is a single route table entry for show.route.
 type ShowRouteEntry struct {
-	MAC    string            `json:"mac"`
-	IP     string            `json:"ip,omitempty"`
-	Owners []ShowRouteOwner  `json:"owners"`
+	MAC    string           `json:"mac"`
+	IP     string           `json:"ip,omitempty"`
+	Owners []ShowRouteOwner `json:"owners"`
 }
 
 type ShowRouteOwner struct {

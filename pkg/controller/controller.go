@@ -565,6 +565,7 @@ func (c *Controller) tcpRecvLoop(cc *ClientConn, afc *AFConn, session *crypto.Se
 		if ci, ok := c.State.Clients[cc.ClientID]; ok {
 			ci.LastSeen = time.Now()
 		}
+		cc.LastRecvAt = time.Now()
 		if chans, ok := cc.AFConns[afc.AF]; ok && chans[afc.Channel] == afc {
 			cc.ActiveAF = afc.AF
 			cc.ActiveChannel = afc.Channel

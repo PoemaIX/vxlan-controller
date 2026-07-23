@@ -57,6 +57,8 @@ func runVxscli(sockPath string, args []string) {
 			} else {
 				vxscliShowRoute(sockPath, "")
 			}
+		case "sync":
+			vxscliShowSync(sockPath)
 		default:
 			vxscliUsage()
 			os.Exit(1)
@@ -74,6 +76,7 @@ func vxscliUsage() {
 	fmt.Fprintln(os.Stderr, "  show client                      Show connected clients")
 	fmt.Fprintln(os.Stderr, "  show route                       Show route table")
 	fmt.Fprintln(os.Stderr, "  show route client <name>         Show routes for a specific client")
+	fmt.Fprintln(os.Stderr, "  show sync                        Per-client sync health (seqid, last-recv age, conns)")
 	fmt.Fprintln(os.Stderr, "  cost get                         Show cost matrix")
 	fmt.Fprintln(os.Stderr, "  cost getmode                     Show current cost mode")
 	fmt.Fprintln(os.Stderr, "  cost setmode <probe|static>      Set cost mode")
@@ -337,6 +340,66 @@ func joinStrings(strs []string, sep string) string {
 		result += sep + s
 	}
 	return result
+}
+
+type ctrlSyncEntry struct {
+	ClientName    string `json:"client_name"`
+	ClientID      string `json:"client_id"`
+	Synced        bool   `json:"synced"`
+	ActiveAF      string `json:"active_af"`
+	ActiveChannel string `json:"active_channel"`
+	RecvSessionID string `json:"recv_session_id"`
+	RecvSeqid     uint64 `json:"recv_seqid"`
+	LastRecvAgoMs int64  `json:"last_recv_ago_ms"`
+	LastSeenAgoMs int64  `json:"last_seen_ago_ms"`
+	Conns         []struct {
+		AF        string `json:"af"`
+		Channel   string `json:"channel"`
+		ConnAgeMs int64  `json:"conn_age_ms"`
+	} `json:"conns"`
+}
+
+func vxscliShowSync(sockPath string) {
+	raw, err := apisock.Call(sockPath, "show.sync", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	var result []ctrlSyncEntry
+	if err := json.Unmarshal(raw, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing response: %v\n", err)
+		os.Exit(1)
+	}
+	if len(result) == 0 {
+		fmt.Println("(no clients)")
+		return
+	}
+	for _, e := range result {
+		flags := ""
+		if !e.Synced {
+			flags = " NOT-SYNCED"
+		}
+		active := e.ActiveAF
+		if e.ActiveChannel != "" {
+			active += "/" + e.ActiveChannel
+		}
+		fmt.Printf("%-16s %s  active=%s  last_recv=%s  last_seen=%s%s\n",
+			e.ClientName, e.ClientID, active, syncAgo(e.LastRecvAgoMs), syncAgo(e.LastSeenAgoMs), flags)
+		fmt.Printf("    rx: session=%s seqid=%d\n", e.RecvSessionID, e.RecvSeqid)
+		for _, cn := range e.Conns {
+			fmt.Printf("    %s/%s: up %s\n", cn.AF, cn.Channel, syncAgo(cn.ConnAgeMs))
+		}
+	}
+}
+
+func syncAgo(ms int64) string {
+	if ms < 0 {
+		return "never"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
 
 func sortedKeys[V any](m map[string]V) []string {
