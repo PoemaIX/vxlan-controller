@@ -818,24 +818,32 @@ tr:hover td { background: rgba(59,158,255,0.03); }
         n.y = (n.rawY - minY) * s;
       });
 
-      // Collision resolution for narrow screens: when the uniform scale
-      // squeezes boxes into each other, push overlapping pairs apart
-      // vertically (the canvas can grow downward and scroll; width cannot).
-      const sepX = 104, sepY = 58; // node box 90x44 + margin
-      for (let iter = 0; iter < 12; iter++) {
+      // Minimum link length instead of plain box-collision: every pair is
+      // linked and a hovered link shows TWO latency labels — each end hides
+      // ~half a node box (45px) and each label needs ~55px, so segments
+      // shorter than this bury the numbers under the boxes. Push pairs
+      // apart symmetrically along their axis (midpoints — and therefore
+      // the configured relative anchors — are preserved); x is clamped so
+      // width never overflows and the residual goes vertical, where the
+      // canvas can grow and scroll.
+      const minLink = 215;
+      const maxSpanX = Math.max(W - 2*pad, 120);
+      for (let iter = 0; iter < 24; iter++) {
         let moved = false;
         for (let i = 0; i < nodes.length; i++) {
           for (let j = i+1; j < nodes.length; j++) {
             const a = nodes[i], b = nodes[j];
-            const dx = b.x - a.x, dy = b.y - a.y;
-            if (Math.abs(dx) < sepX && Math.abs(dy) < sepY) {
-              const push = (sepY - Math.abs(dy)) / 2 + 1;
-              if ((dy >= 0) === (a.rawY <= b.rawY)) { a.y -= push; b.y += push; }
-              else { a.y += push; b.y -= push; }
-              moved = true;
-            }
+            let dx = b.x - a.x, dy = b.y - a.y;
+            let d = Math.sqrt(dx*dx + dy*dy);
+            if (d >= minLink) continue;
+            if (d < 1) { dx = 0; dy = (a.rawY <= b.rawY) ? 1 : -1; d = 1; }
+            const push = (minLink - d) / 2 + 0.5;
+            a.x -= (dx/d) * push; a.y -= (dy/d) * push;
+            b.x += (dx/d) * push; b.y += (dy/d) * push;
+            moved = true;
           }
         }
+        nodes.forEach(n => { n.x = Math.min(Math.max(n.x, 0), maxSpanX); });
         if (!moved) break;
       }
 
@@ -926,8 +934,12 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       html += '<line class="'+linkClass+'" x1="'+l.src.x+'" y1="'+l.src.y+'" x2="'+l.dst.x+'" y2="'+l.dst.y+'"/>';
       html += '<line class="topo-link-hit" x1="'+l.src.x+'" y1="'+l.src.y+'" x2="'+l.dst.x+'" y2="'+l.dst.y+'"/>';
 
-      // Position labels at ~30% and ~70% along the line
-      const t1 = 0.28, t2 = 0.72;
+      // Labels sit a fixed distance past each endpoint's box so they never
+      // hide underneath it; on very long links they stay near their ends.
+      const len0 = Math.hypot(l.dst.x - l.src.x, l.dst.y - l.src.y) || 1;
+      const inset = 72;
+      const t1 = Math.min(Math.max(inset / len0, 0.15), 0.42);
+      const t2 = 1 - t1;
       const x1 = l.src.x + (l.dst.x - l.src.x) * t1;
       const y1 = l.src.y + (l.dst.y - l.src.y) * t1;
       const x2 = l.src.x + (l.dst.x - l.src.x) * t2;
