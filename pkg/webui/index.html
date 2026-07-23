@@ -140,7 +140,7 @@ a.header-left:hover h1 { color: var(--accent); }
 
 /* === LAYOUT === */
 .container {
-  max-width: 960px;
+  max-width: 1180px;
   margin: 0 auto;
   padding: 16px;
   display: flex;
@@ -449,6 +449,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
   display: block;
   font-size: 9px;
   color: var(--text3);
+  opacity: 0.8;
   max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -458,7 +459,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
 
 /* === SCROLL AREA === */
 .scroll-area {
-  max-height: 280px;
+  max-height: 620px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border2) transparent;
@@ -510,6 +511,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       <div class="status-dot" id="ws-dot"></div>
       <span id="ws-status">connecting</span>
       <span id="site-count"></span>
+      <span id="last-upd" style="color:var(--text3)"></span>
     </div>
     <a class="header-github" href="https://github.com/PoemaIX/vxlan-controller" target="_blank" rel="noopener noreferrer" title="GitHub">
       <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -629,7 +631,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (e) => {
-      try { state = JSON.parse(e.data); render(); }
+      try { state = JSON.parse(e.data); lastStateAt = Date.now(); render(); }
       catch(err) { console.error('parse', err); }
     };
   }
@@ -682,7 +684,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
   }
 
   function mcastHTML(stats, rowKey) {
-    if (!stats) return '<span style="color:var(--text3)">-</span>';
+    if (!stats) return '';
     let h = '<span class="mcast-badge">';
     h += '<span class="mcast-tx">tx ' + stats.tx_accepted + '</span>';
     const totalRej = stats.tx_rejected + stats.rx_rejected;
@@ -737,6 +739,16 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     return 'lat-bad';
   }
 
+  // Data freshness in the header: with FDB-persistence a disconnected page
+  // silently shows a frozen snapshot — the age makes that visible.
+  let lastStateAt = null;
+  setInterval(() => {
+    const el = document.getElementById('last-upd');
+    if (!el || !lastStateAt) return;
+    const sec = Math.round((Date.now() - lastStateAt) / 1000);
+    el.textContent = sec <= 1 ? 'updated now' : 'updated ' + (sec < 60 ? sec + 's' : Math.floor(sec/60) + 'm') + ' ago';
+  }, 1000);
+
   // Re-layout on viewport changes (debounced) — the topology scale and the
   // collision layout depend on the actual canvas width.
   let resizeTimer = null;
@@ -744,6 +756,11 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => { if (state) renderTopology(); }, 150);
   });
+
+  // Two-letter column code (full name in the tooltip): "Jord-Home" -> JO.
+  function shortCode(name) {
+    return (name||'').replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase();
+  }
 
   function afChanLabel(af, ch, peerCh) {
     if (!af) return '';
@@ -829,7 +846,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     if (nodes.length > 0) {
       let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
       nodes.forEach(n=>{minX=Math.min(minX,n.rawX);maxX=Math.max(maxX,n.rawX);minY=Math.min(minY,n.rawY);maxY=Math.max(maxY,n.rawY)});
-      const pad = 70;
+      const pad = W < 520 ? 40 : 70;
       const rX = maxX-minX||1, rY = maxY-minY||1;
 
       // Uniform scale with a density cap: positions are abstract units, so
@@ -875,7 +892,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       // Center horizontally; grow the canvas vertically when needed.
       let loX=Infinity, hiX=-Infinity, loY=Infinity, hiY=-Infinity;
       nodes.forEach(n=>{loX=Math.min(loX,n.x);hiX=Math.max(hiX,n.x);loY=Math.min(loY,n.y);hiY=Math.max(hiY,n.y)});
-      H = Math.max(300, (hiY - loY) + 2*pad);
+      H = Math.max(W < 520 ? 240 : 300, (hiY - loY) + 2*pad);
       const offX = (W - (hiX - loX)) / 2 - loX;
       const offY = (H - (hiY - loY)) / 2 - loY;
       nodes.forEach(n => { n.x += offX; n.y += offY; });
@@ -1089,7 +1106,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     });
 
     let h = '<thead><tr><th></th>';
-    clients.forEach(c => { h += '<th class="lat-cell">' + nodeLabel(c.name) + '</th>'; });
+    clients.forEach(c => { h += '<th class="lat-cell" title="' + nodeLabel(c.name) + '">' + shortCode(nodeLabel(c.name)) + '</th>'; });
     h += '</tr></thead><tbody>';
 
     clients.forEach(src => {
@@ -1133,7 +1150,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     });
 
     let h = '<thead><tr><th></th>';
-    clients.forEach(c => { h += '<th class="lat-cell">' + nodeLabel(c.name) + '</th>'; });
+    clients.forEach(c => { h += '<th class="lat-cell" title="' + nodeLabel(c.name) + '">' + shortCode(nodeLabel(c.name)) + '</th>'; });
     h += '</tr></thead><tbody>';
 
     clients.forEach(src => {
