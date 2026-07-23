@@ -791,7 +791,10 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     const W = rect.width || 800;
     let H = 360;
 
-    const nodes = state.clients.map(c => {
+    // Sort for determinism: the client list arrives in map order (random per
+    // update) and the pairwise solver is order-sensitive — without a stable
+    // order the layout re-converges differently on every push.
+    const nodes = [...state.clients].sort((a,b) => a.name.localeCompare(b.name)).map(c => {
       let x = 0, y = 0;
       if (state.config?.nodes?.[c.name]) {
         const n = state.config.nodes[c.name];
@@ -818,15 +821,14 @@ tr:hover td { background: rgba(59,158,255,0.03); }
         n.y = (n.rawY - minY) * s;
       });
 
-      // Minimum link length instead of plain box-collision: every pair is
-      // linked and a hovered link shows TWO latency labels — each end hides
-      // ~half a node box (45px) and each label needs ~55px, so segments
-      // shorter than this bury the numbers under the boxes. Push pairs
-      // apart symmetrically along their axis (midpoints — and therefore
-      // the configured relative anchors — are preserved); x is clamped so
-      // width never overflows and the residual goes vertical, where the
+      // Minimum link length instead of plain box-collision: the two hover
+      // labels sit on opposite sides of the line, so a segment only needs
+      // to clear the end boxes (~2 x 68px worst case) for both numbers to
+      // show. Push closer pairs apart symmetrically along their axis
+      // (midpoints — the configured anchors — are preserved); x is clamped
+      // so width never overflows and the residual goes vertical, where the
       // canvas can grow and scroll.
-      const minLink = 215;
+      const minLink = 140;
       const maxSpanX = Math.max(W - 2*pad, 120);
       for (let iter = 0; iter < 24; iter++) {
         let moved = false;
@@ -934,34 +936,34 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       html += '<line class="'+linkClass+'" x1="'+l.src.x+'" y1="'+l.src.y+'" x2="'+l.dst.x+'" y2="'+l.dst.y+'"/>';
       html += '<line class="topo-link-hit" x1="'+l.src.x+'" y1="'+l.src.y+'" x2="'+l.dst.x+'" y2="'+l.dst.y+'"/>';
 
-      // Labels sit a fixed distance past each endpoint's box so they never
-      // hide underneath it; on very long links they stay near their ends.
-      const len0 = Math.hypot(l.dst.x - l.src.x, l.dst.y - l.src.y) || 1;
-      const inset = 72;
-      const t1 = Math.min(Math.max(inset / len0, 0.15), 0.42);
-      const t2 = 1 - t1;
-      const x1 = l.src.x + (l.dst.x - l.src.x) * t1;
-      const y1 = l.src.y + (l.dst.y - l.src.y) * t1;
-      const x2 = l.src.x + (l.dst.x - l.src.x) * t2;
-      const y2 = l.src.y + (l.dst.y - l.src.y) * t2;
+      // Labels hug the node box border: inset = the box's half-extent along
+      // this link's angle + half the label itself. fwd rides one side of
+      // the line, rev the other, so they can pass each other on short
+      // links without overlapping.
       const dx = l.dst.x - l.src.x, dy = l.dst.y - l.src.y;
       const len = Math.sqrt(dx*dx + dy*dy) || 1;
-      const ox = -dy/len * 10, oy = dx/len * 10;
+      const ux = dx/len, uy = dy/len;
+      const boxClear = Math.abs(ux)*45 + Math.abs(uy)*26 + 2;
+      const ox = -uy * 10, oy = ux * 10;
 
       // Always show both directions as normal
       if (fwdOk) {
         const isSPTDir = fwdInSPT;
         const txt = l.latFwd.toFixed(1) + ' ms';
         const tw = txt.length * 5.2 + 8;
-        html += '<rect class="topo-link-label-bg" x="'+(x1+ox-tw/2)+'" y="'+(y1+oy-7)+'" width="'+tw+'" height="14"/>';
-        html += '<text class="topo-link-label" style="fill:'+(isSPTDir?'var(--green)':'#fff')+'" x="'+(x1+ox)+'" y="'+(y1+oy)+'">'+txt+'</text>';
+        const d1 = Math.min(boxClear + tw/2, len * 0.48);
+        const x1 = l.src.x + ux*d1 + ox, y1 = l.src.y + uy*d1 + oy;
+        html += '<rect class="topo-link-label-bg" x="'+(x1-tw/2)+'" y="'+(y1-7)+'" width="'+tw+'" height="14"/>';
+        html += '<text class="topo-link-label" style="fill:'+(isSPTDir?'var(--green)':'#fff')+'" x="'+x1+'" y="'+y1+'">'+txt+'</text>';
       }
       if (revOk) {
         const isSPTDir = revInSPT;
         const txt = l.latRev.toFixed(1) + ' ms';
         const tw = txt.length * 5.2 + 8;
-        html += '<rect class="topo-link-label-bg" x="'+(x2+ox-tw/2)+'" y="'+(y2+oy-7)+'" width="'+tw+'" height="14"/>';
-        html += '<text class="topo-link-label" style="fill:'+(isSPTDir?'var(--green)':'#fff')+'" x="'+(x2+ox)+'" y="'+(y2+oy)+'">'+txt+'</text>';
+        const d2 = Math.min(boxClear + tw/2, len * 0.48);
+        const x2 = l.dst.x - ux*d2 - ox, y2 = l.dst.y - uy*d2 - oy;
+        html += '<rect class="topo-link-label-bg" x="'+(x2-tw/2)+'" y="'+(y2-7)+'" width="'+tw+'" height="14"/>';
+        html += '<text class="topo-link-label" style="fill:'+(isSPTDir?'var(--green)':'#fff')+'" x="'+x2+'" y="'+y2+'">'+txt+'</text>';
       }
       html += '</g>';
     });
