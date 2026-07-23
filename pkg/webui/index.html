@@ -586,6 +586,28 @@ tr:hover td { background: rgba(59,158,255,0.03); }
   'use strict';
 
   let state = null;
+
+  // Latency label width damping: pad each direction's number (monospace
+  // NBSP) to the longest it has been over the last 10 rounds, so a brief
+  // 5.1 -> 300.6 spike doesn't make labels/columns jitter every round.
+  const latLenHist = {};
+  function recordLatLens() {
+    (state.latency_matrix||[]).forEach(row => {
+      (row.entries||[]).forEach(e => {
+        if (e.latency == null || e.latency >= 1e15) return;
+        const k = row.src + '|' + e.dst;
+        const h = latLenHist[k] || (latLenHist[k] = []);
+        h.push(e.latency.toFixed(1).length);
+        if (h.length > 10) h.shift();
+      });
+    });
+  }
+  function padLat(key, num) {
+    const txt = num.toFixed(1);
+    const h = latLenHist[key];
+    const maxLen = h ? Math.max(txt.length, ...h) : txt.length;
+    return '\u00A0'.repeat(maxLen - txt.length) + txt;
+  }
   let selectedSite = null;
   let expandedRej = {};        // track expanded reject reasons by row key
   let expandedRejDetail = {};  // track expanded detail lists by reason key
@@ -776,6 +798,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
     if (!state) return;
     const online = state.clients.filter(c => c.online).length;
     document.getElementById('site-count').textContent = online + '/' + state.clients.length + ' sites';
+    recordLatLens();
     renderHeader();
     renderTopology();
     renderRouteTable();
@@ -885,6 +908,8 @@ tr:hover td { background: rgba(59,158,255,0.03); }
               src: nodeMap[sorted[0]], dst: nodeMap[sorted[1]],
               latFwd: fwd ? fwd.latency : null,
               latRev: rev ? rev.latency : null,
+              keyFwd: sorted[0] + '|' + sorted[1],
+              keyRev: sorted[1] + '|' + sorted[0],
               labelFwd: fwd ? afChanLabel(fwd.af, fwd.channel, fwd.peer_channel) : '',
               labelRev: rev ? afChanLabel(rev.af, rev.channel, rev.peer_channel) : '',
             });
@@ -949,7 +974,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       // Always show both directions as normal
       if (fwdOk) {
         const isSPTDir = fwdInSPT;
-        const txt = l.latFwd.toFixed(1) + ' ms';
+        const txt = padLat(l.keyFwd, l.latFwd) + ' ms';
         const tw = txt.length * 5.2 + 8;
         const d1 = Math.min(boxClear + tw/2, len * 0.48);
         const x1 = l.src.x + ux*d1 + ox, y1 = l.src.y + uy*d1 + oy;
@@ -958,7 +983,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
       }
       if (revOk) {
         const isSPTDir = revInSPT;
-        const txt = l.latRev.toFixed(1) + ' ms';
+        const txt = padLat(l.keyRev, l.latRev) + ' ms';
         const tw = txt.length * 5.2 + 8;
         const d2 = Math.min(boxClear + tw/2, len * 0.48);
         const x2 = l.dst.x - ux*d2 - ox, y2 = l.dst.y - uy*d2 - oy;
@@ -1077,7 +1102,7 @@ tr:hover td { background: rgba(59,158,255,0.03); }
           if (e && e.latency != null && e.latency < 1e15) {
             const label = afChanLabel(e.af, e.channel, e.peer_channel);
             const pair = label ? '<span class="lat-pair" title="'+label+'">'+label+'</span>' : '';
-            h += '<td class="lat-cell '+latClass(e.latency)+'"><span class="lat-num">'+e.latency.toFixed(1)+'</span>'+pair+'</td>';
+            h += '<td class="lat-cell '+latClass(e.latency)+'"><span class="lat-num">'+padLat(src.id+'|'+dst.id, e.latency)+'</span>'+pair+'</td>';
           } else {
             h += '<td class="lat-cell" style="color:var(--text3)">?</td>';
           }
