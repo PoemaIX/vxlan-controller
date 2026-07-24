@@ -203,6 +203,11 @@ vxccli af list                      # list (af, channel) pairs and bind addresse
 vxccli af get v4                    # get bind address for all channels of an AF
 vxccli af get v4 ISP1               # get bind address for a specific channel
 vxccli af set v4 ISP1 192.168.1.100 # set bind address for a channel (non-autoip only)
+
+# Sync debugging
+vxccli show sync                    # per-controller sync health (seqid, last-recv age, conns)
+vxccli show diff                    # compare every controller's view; exit 2 on mismatch
+vxscli show sync                    # per-client sync health from the controller side
 ```
 
 Or without symlinks: `vxlan-controller --mode vxscli cost get`
@@ -223,6 +228,28 @@ vxscli cost setmode static          # 4. switch to static routing
 ```
 
 In static mode, probing still runs (WebUI sees live data), but route computation uses only the stored costs. Unreachable links (100% packet loss) are still detected and excluded.
+
+### Sync watchdog
+
+With more than one controller, `scripts/vxlan-watchdog.sh` (run as
+`systemd/vxlan-watchdog.service` on any client node) polls `vxccli show diff`
+and alerts — to syslog, and optionally to `WATCHDOG_ALERT_CMD` — when the
+controllers stay divergent across several consecutive checks. A single
+mismatch right after a controller (re)joins is a normal transient and is
+ignored; a persistent one is a bug to investigate (the controllers are
+designed to always converge to identical state). Any client node can run it,
+since a client holds every controller's view. Enable manually:
+
+```bash
+systemctl enable --now vxlan-watchdog          # on one or two client nodes
+```
+
+**Note:** a controller channel must have an endpoint in *every* address family
+it should route. The controller learns a client's endpoint IP by observing the
+connection's source address, so a controller listening only on v4 (e.g. a
+`seednet` channel that is v4-only) never observes clients' v6 endpoints and its
+v6 route matrix is incomplete. Pick a controller channel that exists in both v4
+and v6 (or run a controller per family).
 
 ## Configuration
 
