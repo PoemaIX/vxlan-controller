@@ -58,8 +58,30 @@ func (c *Controller) pushDelta(update *pb.ControllerStateUpdate) {
 		select {
 		case cc.SendQueue <- QueueItem{State: msg}:
 		default:
-			vlog.Warnf("[Controller] send queue full for client %s, marking unsynced", cc.ClientID.Hex())
+			// Queue full: this client fell behind. Mark it unsynced and DRAIN
+			// the backlog — otherwise the full snapshot the send loop will
+			// splice in gets followed by these stale, pre-snapshot deltas
+			// (RouteTable/RouteMatrix are full replacements, so a stale one
+			// reverts the client to an older state). Re-arm a single resync
+			// trigger so the send loop pushes exactly one fresh full state.
+			vlog.Warnf("[Controller] send queue full for client %s, resyncing", cc.ClientID.Hex())
 			cc.Synced = false
+			drainQueue(cc.SendQueue)
+			select {
+			case cc.SendQueue <- QueueItem{}:
+			default:
+			}
+		}
+	}
+}
+
+// drainQueue non-blockingly empties a client send queue.
+func drainQueue(ch chan QueueItem) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
 		}
 	}
 }

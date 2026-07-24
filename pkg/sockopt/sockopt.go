@@ -15,7 +15,9 @@ package sockopt
 
 import (
 	"fmt"
+	"net"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,6 +41,31 @@ func Apply(fd uintptr, o Options) error {
 		}
 	}
 	return nil
+}
+
+// SetTCPUserTimeout sets TCP_USER_TIMEOUT on an established TCP connection: the
+// kernel fails a write whose data stays unacknowledged for longer than d,
+// instead of waiting out tcp_retries2 (~15 min). Crucially — unlike TCP
+// keepalive — this is NOT suppressed by other in-flight data, so a control
+// write to a silently-dead link (e.g. a probe broadcast to a standby channel
+// whose ISP went down with no RST) errors within d and lets the sender tear
+// the connection down. Best-effort: a nil/ non-TCP conn is a no-op.
+func SetTCPUserTimeout(conn net.Conn, d time.Duration) error {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok {
+		return nil
+	}
+	raw, err := tc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var serr error
+	if err := raw.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(d.Milliseconds()))
+	}); err != nil {
+		return err
+	}
+	return serr
 }
 
 // ControlFn returns a function suitable for net.Dialer.Control /

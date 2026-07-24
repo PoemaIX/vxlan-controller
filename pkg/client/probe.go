@@ -683,6 +683,8 @@ func (c *Client) executeProbe(req *pb.ControllerProbeRequest) {
 
 	msg := clientEncodeMessage(protocol.MsgProbeResults, resultsData)
 	c.mu.Lock()
+	// Cache for the heartbeat reply to non-authority probe requests.
+	c.lastProbeResultsMsg = msg
 	for _, cc := range c.Controllers {
 		select {
 		case cc.SendQueue <- ClientQueueItem{Message: msg}:

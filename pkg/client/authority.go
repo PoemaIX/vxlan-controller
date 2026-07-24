@@ -96,31 +96,39 @@ func (c *Client) authoritySelectLoop() {
 		})
 	}
 
-	// Continue monitoring for authority changes
+	// Event-driven authority selection — no polling. The only periodic event
+	// in the system is the controller's probe-request broadcast; a dead or
+	// partitioned authority stops delivering it, so the client's read idle
+	// timeout (or a stalled control write) trips a TCP error, tears the
+	// connection down, and handleClientDisconnect kicks authorityChangeCh when
+	// the controller goes fully disconnected. Which live controller we then
+	// pick doesn't matter — the model keeps every controller's state identical
+	// (if they ever diverge, that's a bug to debug, not to route around).
 	for {
 		select {
 		case <-c.authorityChangeCh:
-			c.mu.Lock()
-			newAuth := c.selectAuthority()
-			changed := false
-			if newAuth == nil && c.AuthorityCtrl != nil {
-				changed = true
-				c.AuthorityCtrl = nil
-				vlog.Infof("[Client] authority controller lost")
-			} else if newAuth != nil && (c.AuthorityCtrl == nil || *newAuth != *c.AuthorityCtrl) {
-				changed = true
-				c.AuthorityCtrl = newAuth
-				vlog.Infof("[Client] authority controller changed to %s", newAuth.Hex()[:8])
-			}
-			c.mu.Unlock()
-
-			if changed {
-				c.notifyFDB()
-				c.notifyFirewall()
-				c.notifyRateLimit()
-			}
 		case <-c.ctx.Done():
 			return
+		}
+
+		c.mu.Lock()
+		newAuth := c.selectAuthority()
+		changed := false
+		if newAuth == nil && c.AuthorityCtrl != nil {
+			changed = true
+			c.AuthorityCtrl = nil
+			vlog.Infof("[Client] authority controller lost")
+		} else if newAuth != nil && (c.AuthorityCtrl == nil || *newAuth != *c.AuthorityCtrl) {
+			changed = true
+			c.AuthorityCtrl = newAuth
+			vlog.Infof("[Client] authority controller changed to %s", newAuth.Hex()[:8])
+		}
+		c.mu.Unlock()
+
+		if changed {
+			c.notifyFDB()
+			c.notifyFirewall()
+			c.notifyRateLimit()
 		}
 	}
 }

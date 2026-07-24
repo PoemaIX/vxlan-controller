@@ -84,6 +84,12 @@ type Client struct {
 	lastProbeResults     map[types.ClientID]*LocalProbeResult
 	lastDebouncedResults map[types.ClientID]*LocalProbeResult
 	probeHistory         map[probeHistoryKey][]*LocalAFProbeResult
+	// lastProbeResultsMsg is the last encoded ProbeResults message (produced by
+	// executeProbe, which only the authority triggers). A non-authority probe
+	// request replies with this cached copy — no re-measurement — so probe
+	// request/response is a bidirectional heartbeat toward every controller.
+	// Guarded by c.mu.
+	lastProbeResultsMsg []byte
 	// preferred (af, channel) per peer
 	preferredAFChannel map[types.ClientID]AFChannel
 
@@ -512,6 +518,10 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
 	}
+	// Fail a stalled write within controlUserTimeout (a probe broadcast to a
+	// silently-dead standby link, or results toward a dead active link) so the
+	// dead conn is torn down and rotation/failover proceeds.
+	_ = sockopt.SetTCPUserTimeout(conn, controlUserTimeout)
 
 	vlog.Infof("[Client] connected to controller %s on AF=%s channel=%s", ctrlID.Hex()[:8], af, ch)
 
@@ -636,6 +646,15 @@ func (c *Client) connectToController(ctrlID types.ControllerID, af types.AFName,
 		cc.AFConns[af] = make(map[types.ChannelName]*ClientAFConn)
 	}
 	cc.AFConns[af][ch] = afc
+	// If this controller has no active control channel yet, adopt one now and
+	// kick the send loop to push a full sync. (If one is already active, this
+	// new conn just becomes a standby for failover.)
+	if !c.activeValidLocked(cc) && c.pickActiveLocked(cc) {
+		select {
+		case cc.SendQueue <- ClientQueueItem{}:
+		default:
+		}
+	}
 	c.mu.Unlock()
 
 	// Start UDP read loop for multicast delivery
@@ -821,9 +840,9 @@ func (c *Client) handleControllerState(ctrlID types.ControllerID, af types.AFNam
 	cc.State = view
 	cc.Synced = true
 
-	// Full update received on this (af, channel) → set as active
-	cc.ActiveAF = af
-	cc.ActiveChannel = ch
+	// NOTE: receiving a full state does NOT move the active channel. Active is
+	// pinned to one connection and moves only when that connection dies (see
+	// pickActiveLocked), so the control stream keeps TCP's ordering guarantee.
 
 	vlog.Debugf("[Client] received full state from controller %s (AF=%s channel=%s, %d clients)", ctrlID.Hex()[:8], af, ch, view.ClientCount)
 
@@ -924,31 +943,43 @@ func (c *Client) handleControllerProbeRequest(ctrlID types.ControllerID, af type
 
 	c.mu.Lock()
 	cc, ok := c.Controllers[ctrlID]
-	isAuthority := ok && c.AuthorityCtrl != nil && *c.AuthorityCtrl == ctrlID
-	if isAuthority {
-		if req.ProbeId <= cc.lastProbeID {
-			c.mu.Unlock()
-			return
-		}
-		cc.lastProbeID = req.ProbeId
-		if chans, ok := cc.AFConns[af]; ok {
-			if afc, ok := chans[ch]; ok {
-				select {
-				case <-afc.Done:
-				default:
-					cc.ActiveAF = af
-					cc.ActiveChannel = ch
-				}
-			}
-		}
+	if !ok {
+		c.mu.Unlock()
+		return
 	}
+	// Per-controller probe_id dedup: the request is broadcast on every conn to
+	// this controller, so handle each probe_id once. (Applies to authority and
+	// non-authority alike now that both react to it.)
+	if req.ProbeId <= cc.lastProbeID {
+		c.mu.Unlock()
+		return
+	}
+	cc.lastProbeID = req.ProbeId
+	isAuthority := c.AuthorityCtrl != nil && *c.AuthorityCtrl == ctrlID
+	cached := c.lastProbeResultsMsg
 	c.mu.Unlock()
+	// NOTE: a probe broadcast does NOT move the active channel. Active is
+	// pinned to one connection (see pickActiveLocked); letting every probe
+	// repoint it was what split one sync session across multiple TCP
+	// connections and broke ordering.
 
-	if !isAuthority {
+	if isAuthority {
+		// The authority drives real measurement; executeProbe sends the fresh
+		// results to ALL controllers.
+		go c.executeProbe(&req)
 		return
 	}
 
-	go c.executeProbe(&req)
+	// Non-authority: reply with our last measured results (cached, no re-probe)
+	// so this probe request/response is a bidirectional heartbeat — the
+	// controller's recv-idle timer sees our reply and won't falsely declare a
+	// still-alive-but-idle client dead.
+	if cached != nil {
+		select {
+		case cc.SendQueue <- ClientQueueItem{Message: cached}:
+		default:
+		}
+	}
 }
 
 func (c *Client) getVxlanDstPort(af types.AFName, ch types.ChannelName) uint16 {
@@ -1026,6 +1057,11 @@ func (c *Client) filterRouteTable(rt []*types.RouteTableEntry) []*types.RouteTab
 // tcpConnLoop reconnects (rotating to the controller's next address).
 const clientControlWriteLimit = 2 * time.Second
 
+// controlUserTimeout bounds unacknowledged control data on a client↔controller
+// TCP conn before the write fails (TCP_USER_TIMEOUT) — see the controller-side
+// constant of the same name.
+const controlUserTimeout = 15 * time.Second
+
 func writeControl(afc *ClientAFConn, msgType protocol.MsgType, payload []byte) error {
 	_ = afc.TCPConn.SetWriteDeadline(time.Now().Add(clientControlWriteLimit))
 	err := protocol.WriteTCPMessage(afc.TCPConn, afc.Session, msgType, payload)
@@ -1036,40 +1072,87 @@ func writeControl(afc *ClientAFConn, msgType protocol.MsgType, payload []byte) e
 	return err
 }
 
+// activeValidLocked reports whether cc's active (af, channel) still points at
+// a live connection. Must be called with c.mu held.
+func (c *Client) activeValidLocked(cc *ControllerConn) bool {
+	if cc.ActiveAF == "" {
+		return false
+	}
+	chans, ok := cc.AFConns[cc.ActiveAF]
+	if !ok {
+		return false
+	}
+	afc := chans[cc.ActiveChannel]
+	return afc != nil && afc.Connected
+}
+
+// pickActiveLocked keeps the current active (af, channel) if it is still live,
+// otherwise selects a connected one deterministically. The whole client→
+// controller control stream (full sync + increments) rides ONE connection so
+// TCP's ordering/completeness guarantee actually covers the session; the
+// active channel therefore moves ONLY when its connection dies. Any such move
+// forces a fresh full resync (MACsSynced=false) so the stream restarts cleanly
+// on the new connection. Returns true if an active channel is set.
+// Must be called with c.mu held.
+func (c *Client) pickActiveLocked(cc *ControllerConn) bool {
+	if c.activeValidLocked(cc) {
+		return true
+	}
+	// Choose the connected conn with the smallest af+channel key (stable).
+	var bestAF types.AFName
+	var bestCh types.ChannelName
+	found := false
+	for af, chans := range cc.AFConns {
+		for ch, afc := range chans {
+			if afc == nil || !afc.Connected {
+				continue
+			}
+			key := string(af) + "/" + string(ch)
+			if !found || key < string(bestAF)+"/"+string(bestCh) {
+				bestAF, bestCh, found = af, ch, true
+			}
+		}
+	}
+	if !found {
+		cc.ActiveAF = ""
+		cc.ActiveChannel = ""
+		return false
+	}
+	if cc.ActiveAF != bestAF || cc.ActiveChannel != bestCh {
+		cc.ActiveAF = bestAF
+		cc.ActiveChannel = bestCh
+		cc.MACsSynced = false // new active channel → restart full sync here
+	}
+	return true
+}
+
 func (c *Client) controllerSendLoop(cc *ControllerConn) {
 	for item := range cc.SendQueue {
 		c.mu.Lock()
-		if cc.ActiveAF == "" {
+		if !c.pickActiveLocked(cc) {
 			c.mu.Unlock()
 			continue
 		}
-		chans, ok := cc.AFConns[cc.ActiveAF]
-		if !ok {
-			c.mu.Unlock()
-			continue
-		}
-		afc := chans[cc.ActiveChannel]
-		if afc == nil {
-			c.mu.Unlock()
-			continue
-		}
+		afc := cc.AFConns[cc.ActiveAF][cc.ActiveChannel]
 		synced := cc.MACsSynced
 		c.mu.Unlock()
 
 		if !synced {
 			fullMsg := c.getFullMACsEncodedAndStamp(cc)
 
-			c.mu.Lock()
-			cc.MACsSynced = true
-			c.mu.Unlock()
-
 			if fullMsg != nil {
 				msgType := protocol.MsgType(fullMsg[0])
 				payload := fullMsg[1:]
 				if err := writeControl(afc, msgType, payload); err != nil {
-					continue
+					continue // write failed → MACsSynced stays false, retry next item
 				}
 			}
+			// Mark synced only AFTER the full snapshot is on the wire, so a
+			// failed write doesn't leave us believing a session the controller
+			// never received.
+			c.mu.Lock()
+			cc.MACsSynced = true
+			c.mu.Unlock()
 			continue
 		}
 
@@ -1128,6 +1211,26 @@ func (c *Client) handleClientDisconnect(cc *ControllerConn, af types.AFName, ch 
 		cc.ActiveAF = ""
 		cc.ActiveChannel = ""
 		cc.MACsSynced = false
+		// Fail over to another live connection to this controller and restart
+		// the full sync there. pickActiveLocked sets MACsSynced=false again;
+		// the kicked send loop then pushes a fresh full snapshot.
+		if c.pickActiveLocked(cc) {
+			select {
+			case cc.SendQueue <- ClientQueueItem{}:
+			default:
+			}
+		}
+	}
+
+	// If the controller is now fully disconnected it is no longer a viable
+	// authority — drop its Synced flag and re-evaluate authority selection so
+	// a live controller takes over (a dead one otherwise stays pinned).
+	if len(cc.AFConns) == 0 {
+		cc.Synced = false
+		select {
+		case c.authorityChangeCh <- struct{}{}:
+		default:
+		}
 	}
 }
 

@@ -26,6 +26,11 @@ const (
 	keepAlivePeriod   = 30 * time.Second
 	offlineCheckEvery = 30 * time.Second
 	controlWriteLimit = 2 * time.Second
+	// controlUserTimeout bounds how long unacknowledged control data may sit
+	// before the write fails (TCP_USER_TIMEOUT). Well above the probe interval
+	// so healthy links never trip it; far below tcp_retries2 so a dead link is
+	// detected in seconds.
+	controlUserTimeout = 15 * time.Second
 )
 
 // Controller implements the VXLAN controller.
@@ -295,6 +300,10 @@ func (c *Controller) tcpAcceptLoop(al *AFListener) {
 			tc.SetKeepAlive(true)
 			tc.SetKeepAlivePeriod(keepAlivePeriod)
 		}
+		// Fail a stalled write within controlUserTimeout so a probe broadcast
+		// to a silently-dead client link tears the conn down instead of
+		// lingering ~15 min (tcp_retries2) and keeping the client "alive".
+		_ = sockopt.SetTCPUserTimeout(conn, controlUserTimeout)
 
 		go c.handleTCPConn(al.AF, al.Channel, conn)
 	}
@@ -308,6 +317,12 @@ func (c *Controller) handleTCPConn(af types.AFName, ch types.ChannelName, conn n
 
 	// Step 1: Noise IK handshake
 	localIndex := c.udpSessions.AllocateIndex()
+
+	// Bound the pre-session reads: a peer that completes the TCP handshake then
+	// goes silent (scanner, half-open, link drop mid-handshake) would otherwise
+	// pin this goroutine + fd until keepalive fires minutes later. Cleared once
+	// the recv loop takes over (which sets its own per-read deadline).
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	// Read HandshakeInit
 	initMsg, err := protocol.ReadTCPRaw(conn)
@@ -332,12 +347,13 @@ func (c *Controller) handleTCPConn(af types.AFName, ch types.ChannelName, conn n
 	clientID := types.ClientID(session.PeerID)
 	vlog.Debugf("[Controller] handshake completed with client %s on AF=%s channel=%s", clientID.Hex()[:8], af, ch)
 
-	// Step 2: Read ClientRegister
+	// Step 2: Read ClientRegister (still under the handshake read deadline)
 	msgType, payload, err := protocol.ReadTCPMessage(conn, session)
 	if err != nil {
 		vlog.Errorf("[Controller] read ClientRegister error: %v", err)
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{}) // recv loop sets its own per-read deadline
 	if msgType != protocol.MsgClientRegister {
 		vlog.Warnf("[Controller] expected ClientRegister, got %d", msgType)
 		return
@@ -554,6 +570,22 @@ func (c *Controller) tcpRecvLoop(cc *ClientConn, afc *AFConn, session *crypto.Se
 		default:
 		}
 
+		// Idle read deadline — but ONLY on the active connection. A client
+		// sends its control stream (MAC/results/heartbeat) over its ONE active
+		// channel, so a standby connection legitimately receives nothing from
+		// the client (it only carries our outbound probe broadcasts). Arming a
+		// read deadline on standbys would false-positive and churn them. The
+		// active conn does carry client traffic, so idle there means the client
+		// is really gone — which then tears down the active conn and fails over
+		// to a standby (promoting it, at which point it gets the deadline).
+		c.mu.Lock()
+		isActive := cc.ActiveAF == afc.AF && cc.ActiveChannel == afc.Channel
+		c.mu.Unlock()
+		if idle := c.recvIdleTimeout(); idle > 0 && isActive {
+			_ = afc.TCPConn.SetReadDeadline(time.Now().Add(idle))
+		} else {
+			_ = afc.TCPConn.SetReadDeadline(time.Time{})
+		}
 		msgType, payload, err := protocol.ReadTCPMessage(afc.TCPConn, session)
 		if err != nil {
 			vlog.Errorf("[Controller] TCP recv error from %s: %v", cc.ClientID.Hex()[:8], err)
@@ -566,15 +598,21 @@ func (c *Controller) tcpRecvLoop(cc *ClientConn, afc *AFConn, session *crypto.Se
 			ci.LastSeen = time.Now()
 		}
 		cc.LastRecvAt = time.Now()
-		if chans, ok := cc.AFConns[afc.AF]; ok && chans[afc.Channel] == afc {
-			cc.ActiveAF = afc.AF
-			cc.ActiveChannel = afc.Channel
+		// Adopt this conn as active ONLY if there is no live active channel.
+		// Active must stay pinned to one connection so the controller→client
+		// delta stream keeps TCP's ordering guarantee; it moves when the active
+		// conn dies, or when a MAC full-sync arrives (handled in handleMACUpdate).
+		if !c.activeValidLocked(cc) {
+			if chans, ok := cc.AFConns[afc.AF]; ok && chans[afc.Channel] == afc {
+				cc.ActiveAF = afc.AF
+				cc.ActiveChannel = afc.Channel
+			}
 		}
 		c.mu.Unlock()
 
 		switch msgType {
 		case protocol.MsgMACUpdate:
-			c.handleMACUpdate(cc, payload)
+			c.handleMACUpdate(cc, afc, payload)
 		case protocol.MsgProbeResults:
 			c.handleProbeResults(cc, payload)
 		case protocol.MsgMcastStatsReport:
@@ -585,7 +623,7 @@ func (c *Controller) tcpRecvLoop(cc *ClientConn, afc *AFConn, session *crypto.Se
 	}
 }
 
-func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
+func (c *Controller) handleMACUpdate(cc *ClientConn, afc *AFConn, payload []byte) {
 	var update pb.MACUpdate
 	if err := proto.Unmarshal(payload, &update); err != nil {
 		vlog.Infof("[Controller] unmarshal MACUpdate error: %v", err)
@@ -608,6 +646,19 @@ func (c *Controller) handleMACUpdate(cc *ClientConn, payload []byte) {
 			cc.LastClientSessionID = update.SessionId
 		}
 		cc.LastClientSeqid = update.Seqid
+	}
+
+	// A full sync means the client (re)started its control stream on THIS
+	// connection — e.g. after failing over to a new channel. Realign the
+	// controller's own active channel to match and push a fresh full state
+	// back, so both directions restart cleanly on this one connection.
+	if update.IsFull {
+		if chans, ok := cc.AFConns[afc.AF]; ok && chans[afc.Channel] == afc {
+			cc.ActiveAF = afc.AF
+			cc.ActiveChannel = afc.Channel
+		}
+		cc.Synced = false
+		c.trySyncClient(cc)
 	}
 
 	if update.IsFull {
@@ -1052,6 +1103,35 @@ func (c *Controller) handleClientSendError(cc *ClientConn, afc *AFConn, err erro
 		cc.Synced = false
 	}
 	c.mu.Unlock()
+}
+
+// activeValidLocked reports whether cc's active (af, channel) still points at
+// a live connection. Must be called with c.mu held.
+func (c *Controller) activeValidLocked(cc *ClientConn) bool {
+	if cc.ActiveAF == "" {
+		return false
+	}
+	chans, ok := cc.AFConns[cc.ActiveAF]
+	if !ok {
+		return false
+	}
+	return chans[cc.ActiveChannel] != nil
+}
+
+// recvIdleTimeout is how long a client control connection may be silent before
+// the read is treated as dead. The controller broadcasts a probe request every
+// probe_interval_s, so any client that is actually alive sends/acks well within
+// this window; 3x the interval (min 30s) tolerates jitter.
+func (c *Controller) recvIdleTimeout() time.Duration {
+	iv := c.Config.Probing.ProbeIntervalS
+	if iv <= 0 {
+		iv = 5
+	}
+	d := time.Duration(iv*3) * time.Second
+	if d < 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
 }
 
 // pickActiveAFChannel selects the (af, channel) with the earliest connection time.
