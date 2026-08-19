@@ -1153,7 +1153,14 @@ func (c *Client) controllerSendLoop(cc *ControllerConn) {
 			c.mu.Lock()
 			cc.MACsSynced = true
 			c.mu.Unlock()
-			continue
+			// The full snapshot just sent already carries every local MAC, so
+			// this item's MACDelta is now redundant — drop it. But item.Message
+			// (probe results, mcast stats) is state INDEPENDENT of MAC sync;
+			// dropping it here (the old `continue`) was why a controller we kept
+			// re-syncing against never received our probe latency, leaving its
+			// RouteMatrix empty for us and the two controllers permanently out
+			// of sync. Fall through so the Message still goes out.
+			item.MACDelta = nil
 		}
 
 		if item.MACDelta != nil {
