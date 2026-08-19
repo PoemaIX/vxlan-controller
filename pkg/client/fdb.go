@@ -47,6 +47,21 @@ func (c *Client) fdbReconcileLoop() {
 }
 
 func (c *Client) reconcileFDB() {
+	// Snapshot locally-owned MACs under macMu BEFORE taking c.mu. The neighbor
+	// handlers hold macMu while acquiring c.mu (macMu → c.mu); taking the two
+	// locks in the opposite order here is an AB-BA deadlock — observed in
+	// production, where reconcileFDB sat on macMu.RLock while a neigh handler
+	// held macMu and waited on c.mu, wedging every c.mu waiter (the client went
+	// silent and controllers saw it offline). Releasing macMu before c.mu keeps
+	// one global lock order. The snapshot only excludes locally-owned MACs, so a
+	// slightly stale view between the two locks is harmless.
+	c.macMu.RLock()
+	localMACSet := make(map[string]struct{}, len(c.LocalMACs))
+	for _, lm := range c.LocalMACs {
+		localMACSet[net.HardwareAddr(lm.MAC).String()] = struct{}{}
+	}
+	c.macMu.RUnlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -161,16 +176,10 @@ func (c *Client) reconcileFDB() {
 		}
 	}
 
-	// Build set of locally-owned MACs so we never install remote FDB entries
-	// for addresses that belong to this node (e.g. the bridge device MAC).
-	// Without this, a remote site announcing the same MAC would overwrite the
-	// bridge's native local FDB entry, and withdrawal would then delete it.
-	c.macMu.RLock()
-	localMACSet := make(map[string]struct{}, len(c.LocalMACs))
-	for _, lm := range c.LocalMACs {
-		localMACSet[net.HardwareAddr(lm.MAC).String()] = struct{}{}
-	}
-	c.macMu.RUnlock()
+	// localMACSet (snapshotted at the top under macMu) lets us skip installing
+	// remote FDB entries for addresses this node owns (e.g. the bridge MAC);
+	// otherwise a remote site announcing the same MAC would overwrite the
+	// bridge's native local entry, and its withdrawal would then delete it.
 
 	// Also add FDB entries for routes from RouteMatrix that have direct MAC entries
 	// from remote clients
